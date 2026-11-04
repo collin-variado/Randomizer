@@ -1,0 +1,398 @@
+using System;
+using System.IO;
+using System.Linq;
+using pk3DS.Core.CTR;
+using pk3DS.Core.Structures.PersonalInfo;
+using pk3DS.Core.Structures;
+using pk3DS.Core.Modding;
+
+namespace pk3DS.Core;
+
+public class GameConfig
+{
+    public static bool ExpandedAbilities { get; set; } = false;
+
+    public static string TrySetPassiveAbilities(bool on) => PassiveGuard.TrySet(on, ExpandedAbilities);
+
+    public static string TrySetExpandedAbilities(bool on)
+    {
+        if (PassiveGuard.RefuseExpanded(on) is { } why) return why;
+        ExpandedAbilities = on;
+        return null;
+    }
+
+    public static bool AllowGrowth { get; set; } = false;
+    private const int FILECOUNT_XY = 271;
+    private const int FILECOUNT_ORASDEMO = 301;
+    private const int FILECOUNT_ORAS = 299;
+    private const int FILECOUNT_SMDEMO = 239;
+    private const int FILECOUNT_SM = 311;
+    private const int FILECOUNT_USUM = 333;
+    public readonly GameVersion Version = GameVersion.Invalid;
+
+    public GARCReference[] Files { get; private set; }
+    public TextVariableCode[] Variables { get; private set; }
+    public TextReference[] GameText { get; private set; }
+    public GameInfo Info { get; private set; }
+
+    public bool RemapCharacters { get; set; } = false;
+
+    public GameConfig(int fileCount)
+    {
+        GameVersion game = fileCount switch
+        {
+            FILECOUNT_XY => GameVersion.XY,
+            FILECOUNT_ORASDEMO => GameVersion.ORASDEMO,
+            FILECOUNT_ORAS => GameVersion.ORAS,
+            FILECOUNT_SMDEMO => GameVersion.SMDEMO,
+            FILECOUNT_SM => GameVersion.SM,
+            FILECOUNT_USUM => GameVersion.USUM,
+            _ => GameVersion.Invalid,
+        };
+        if (game == GameVersion.Invalid)
+            return;
+
+        Version = game;
+    }
+
+    public GameConfig(GameVersion game)
+    {
+        Version = game;
+    }
+
+    private void GetGameData(GameVersion game)
+    {
+        switch (game)
+        {
+            case GameVersion.XY:
+                Files = GARCReference.GARCReference_XY;
+                Variables = TextVariableCode.VariableCodes_XY;
+                GameText = TextReference.GameText_XY;
+                break;
+
+            case GameVersion.ORASDEMO:
+            case GameVersion.ORAS:
+                Files = GARCReference.GARCReference_AO;
+                Variables = TextVariableCode.VariableCodes_AO;
+                GameText = TextReference.GameText_AO;
+                break;
+
+            case GameVersion.SMDEMO:
+                Files = GARCReference.GARCReference_SMDEMO;
+                Variables = TextVariableCode.VariableCodes_SM;
+                GameText = TextReference.GameText_SMDEMO;
+                break;
+            case GameVersion.SN:
+            case GameVersion.MN:
+            case GameVersion.SM:
+                Files = GARCReference.GARCReference_SN;
+                if (new FileInfo(Path.Combine(RomFS, GetGARCFileName("encdata"))).Length == 0)
+                    Files = GARCReference.GARCReference_MN;
+                Variables = TextVariableCode.VariableCodes_SM;
+                GameText = TextReference.GameText_SM;
+                break;
+            case GameVersion.US:
+            case GameVersion.UM:
+            case GameVersion.USUM:
+                // game == UM is the only authoritative signal here; the path check only runs
+                // for the ambiguous GameVersion.USUM case and is a best-effort fallback, not a
+                // real version detection - there is no verified in-file byte signature that
+                // distinguishes a US ROM dump from a UM one, so callers that actually know the
+                // version should pass GameVersion.US/UM explicitly rather than relying on this.
+                bool isUM = (game == GameVersion.UM) || LooksLikeUltraMoonPath(RomFS);
+                Files = isUM ? GARCReference.GARCReference_UM : GARCReference.GARCReference_US;
+                Variables = TextVariableCode.VariableCodes_SM;
+                GameText = TextReference.GameText_USUM;
+                break;
+        }
+    }
+
+    public void Initialize(string romFSpath, string exeFSpath, int lang)
+    {
+        RomFS = romFSpath;
+        ExeFS = exeFSpath;
+        Language = lang;
+        GetGameData(Version);
+        InitializeAll();
+    }
+
+    public void InitializeAll()
+    {
+        bool passivesAtBuild = PassiveGuard.Enabled;
+        InitializePersonal();
+        InitializeLearnset();
+        InitializeGameText();
+        InitializeMoves();
+        InitializeEvos();
+        InitializeGameInfo();
+        // Uhuru detection (in InitializeGameInfo) can force passives off after the personal table was built with TM bits 104+ masked.
+        if (passivesAtBuild != PassiveGuard.Enabled) InitializePersonal();
+    }
+
+    public void InitializePersonal()
+    {
+        GARCPersonal = GetGARCData("personal");
+        // Uhuru's combined file has 93 junk entries + 36 trailing bytes; only FileCount-1 entries are real.
+        byte[] combined = GARCPersonal.GetFile(GARCPersonal.FileCount - 1);
+        int max = GARCPersonal.GetFile(0).Length * (GARCPersonal.FileCount - 1);
+        Personal = new PersonalTable(combined.Length > max ? combined[..max] : combined, Version);
+    }
+
+    public void InitializeLearnset()
+    {
+        GARCLearnsets = GetGARCData("levelup");
+        switch (Generation)
+        {
+            case 6:
+                Learnsets = GARCLearnsets.Files.Select(file => new Learnset6(file)).ToArray();
+                break;
+            case 7:
+                Learnsets = GARCLearnsets.Files.Select(file => new Learnset6(file)).ToArray();
+                break;
+        }
+    }
+
+    public void InitializeGameText()
+    {
+        GARCGameText = GetGARCData("gametext");
+        GameTextStrings = GARCGameText.Files.Select(file => new TextFile(this, file, RemapCharacters).Lines).ToArray();
+    }
+
+    public void InitializeMoves()
+    {
+        GARCMoves = GetGARCData("move");
+        switch (Generation)
+        {
+            case 6:
+                if (XY)
+                    Moves = GARCMoves.Files.Select(file => new Move6(file)).ToArray();
+                if (ORAS)
+                    Moves = Mini.UnpackMini(GARCMoves.GetFile(0), "WD").Select(file => new Move6(file)).ToArray();
+                break;
+            case 7:
+                Moves = Mini.UnpackMini(GARCMoves.GetFile(0), "WD").Select(file => new Move7(file)).ToArray();
+                break;
+        }
+    }
+    public void InitializeEvos()
+    {
+        var g = GetGARCData("evolution");
+        byte[][] d = g.Files;
+        switch (Generation)
+        {
+            case 6:
+                Evolutions = d.Select(z => new EvolutionSet6(z)).ToArray();
+                break;
+            case 7:
+                Evolutions = d.Select(z => new EvolutionSet7(z)).ToArray();
+                break;
+        }
+    }
+
+    private void InitializeGameInfo()
+    {
+        Info = new GameInfo(this);
+        // Uhuru's trdata/trpoke hold 5/7 difficulty blocks per trainer name; stock ROMs stay at 0.
+        if (Generation == 7)
+            Info.TrainerBaseCount = TrainerBlocks.DetectBaseCount(GetText(TextName.TrainerNames).Length, GetGARCData("trdata")?.FileCount ?? 0, GetGARCData("trpoke")?.FileCount ?? 0);
+        pk3DS.Core.Modding.UhuruGuard.Active = Info.TrainerBaseCount > 0; // reset on every open, so a stock ROM clears it
+        PassiveGuard.EnforceOnOpen(); // after Uhuru detection: a toggle-only check is bypassed by enabling on one ROM and opening Uhuru next
+    }
+
+    public LazyGARCFile GetlzGARCData(string file)
+    {
+        var gr = GetGARCReference(file);
+        if (gr == null) return null;
+        gr = gr.LanguageVariant ? gr.GetRelativeGARC(Language, gr.Name) : gr;
+        return new LazyGARCFile(GetlzGARC(file), gr, GetGARCPath(file));
+    }
+
+    public GARCFile GetGARCData(string file, bool skipRelative = false)
+    {
+        var gr = GetGARCReference(file);
+        if (gr == null) return null;
+        if (gr.LanguageVariant && !skipRelative)
+            gr = gr.GetRelativeGARC(Language, gr.Name);
+        return GetGARCByReference(gr);
+    }
+
+    public GARCFile GetGARCByReference(GARCReference gr)
+    {
+        try
+        {
+            return new(GetMemGARC(gr.Name), gr, GetGARCPath(gr.Name));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to load GARC {gr.Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    public string GetGARCPath(string file)
+    {
+        var gr = GetGARCReference(file);
+        if (gr == null) return null;
+        gr = gr.LanguageVariant ? gr.GetRelativeGARC(Language, gr.Name) : gr;
+        string subloc = gr.Reference;
+        return Path.Combine(RomFS, subloc);
+    }
+
+    private GARC.MemGARC GetMemGARC(string file)
+    {
+        return new(GetGARCPath(file));
+    }
+
+    private GARC.LazyGARC GetlzGARC(string file)
+    {
+        return new(GetGARCPath(file));
+    }
+
+    public string RomFS, ExeFS;
+
+    public GARCReference GetGARCReference(string name) { return Files?.FirstOrDefault(f => f.Name == name); }
+    public TextVariableCode GetVariableCode(string name) { return Variables?.FirstOrDefault(v => v.Name == name); }
+    public TextVariableCode GetVariableName(int value) { return Variables?.FirstOrDefault(v => v.Code == value); }
+
+    private TextReference GetGameText(TextName name) { return GameText?.FirstOrDefault(f => f.Name == name); }
+    public TextData GetTextData(TextName file) => new(GetText(file));
+
+    public string[] GetText(TextName file)
+    {
+        var textRef = GetGameText(file);
+        if (textRef == null || GameTextStrings == null || textRef.Index >= GameTextStrings.Length) return Array.Empty<string>();
+        string[] raw = (string[])GameTextStrings[textRef.Index].Clone();
+
+        if (file == TextName.SpeciesNames && Info != null && Info.MaxSpeciesID > 807)
+        {
+            int targetLen = Math.Max(raw.Length, Info.MaxSpeciesID + 1);
+            if (raw.Length < targetLen)
+            {
+                Array.Resize(ref raw, targetLen);
+            }
+            for (int i = 808; i < raw.Length; i++)
+            {
+                if (string.IsNullOrWhiteSpace(raw[i]))
+                {
+                    int gen8Index = i - 808;
+                    if (gen8Index >= 0 && gen8Index < Gen89SpeciesNames.Names808_1025.Length)
+                        raw[i] = Gen89SpeciesNames.Names808_1025[gen8Index];
+                    else
+                        raw[i] = $"Species {i}";
+                }
+            }
+        }
+
+        for (int i = 0; i < raw.Length; i++)
+            raw[i] ??= "";
+
+        return raw;
+    }
+
+    public bool SetText(TextName file, string[] strings)
+    {
+        GameTextStrings[GetGameText(file).Index] = strings;
+        return true;
+    }
+
+    public void SaveText(TextName file)
+    {
+        int index = GetGameText(file).Index;
+        GARCGameText.Files[index] = TextFile.GetBytes(this, GameTextStrings[index]);
+        GARCGameText.Save();
+    }
+
+    public string GetGARCFileName(string requestedGARC)
+    {
+        // Hardcoded overrides for Gen 7 detection stability (verified for USUM/SM)
+        if (Version == GameVersion.SN || Version == GameVersion.MN || Version == GameVersion.SM || Version == GameVersion.US || Version == GameVersion.UM || Version == GameVersion.USUM)
+        {
+            switch (requestedGARC)
+            {
+                case "menuicon": return USUM ? "a/0/6/2" : "a/0/9/3";
+                case "itemicon": return USUM ? "a/0/6/1" : "a/0/9/4";
+                case "owtrainer": return USUM ? "a/0/7/0" : "a/0/6/9";
+                case "levelup": return USUM ? "a/0/1/3" : "a/0/1/2";
+                case "move": return USUM ? "a/0/1/1" : "a/0/1/1";
+            }
+        }
+
+        var garc = GetGARCReference(requestedGARC);
+        if (garc == null)
+            return "NULL_REFERENCE";
+            
+        if (garc.LanguageVariant)
+            garc = garc.GetRelativeGARC(Language);
+
+        return garc.Reference;
+    }
+
+    public int Language { get; set; }
+
+    public GARCFile GARCPersonal, GARCLearnsets, GARCMoves, GARCGameText;
+    public PersonalTable Personal { get; private set; }
+    public Learnset[] Learnsets { get; private set; }
+    public string[][] GameTextStrings { get; private set; }
+    public Move[] Moves { get; private set; }
+    public EvolutionSet[] Evolutions { get; private set; }
+
+    public bool XY => Version == GameVersion.XY;
+    public bool ORAS => Version is GameVersion.ORAS or GameVersion.ORASDEMO;
+    public bool SM => Version is GameVersion.SM or GameVersion.SMDEMO or GameVersion.SN or GameVersion.MN;
+    public bool USUM => Version is GameVersion.USUM or GameVersion.US or GameVersion.UM;
+    
+    public bool X => Version == GameVersion.X;
+    public bool Y => Version == GameVersion.Y;
+    public bool OR => Version == GameVersion.OR;
+    public bool AS => Version == GameVersion.AS;
+    public bool Sun => Version == GameVersion.SN || Files == GARCReference.GARCReference_SN;
+    public bool Moon => Version == GameVersion.MN || Files == GARCReference.GARCReference_MN;
+    public bool UltraSun => Version == GameVersion.US || (USUM && !UltraMoon);
+    public bool UltraMoon => Version == GameVersion.UM ||
+        Files == GARCReference.GARCReference_UM ||
+        LooksLikeUltraMoonPath(RomFS);
+
+    private static bool LooksLikeUltraMoonPath(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return false;
+        var segments = path.Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries);
+        foreach (var seg in segments)
+        {
+            if (seg.Equals("UM", StringComparison.OrdinalIgnoreCase)) return true;
+            if (seg.Contains("Ultra Moon", StringComparison.OrdinalIgnoreCase)) return true;
+            if (seg.Contains("UltraMoon", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    public int VersionID => (int)Version;
+
+    public int MaxSpeciesID => (Info != null && Info.MaxSpeciesID > 0) ? Info.MaxSpeciesID : (XY || ORAS ? Legal.MaxSpeciesID_6 : SM ? Legal.MaxSpeciesID_7_SM : Legal.MaxSpeciesID_7_USUM);
+    public int GARCVersion => XY || ORAS ? GARC.VER_4 : GARC.VER_6;
+
+    public int Generation
+    {
+        get
+        {
+            if (XY || ORAS)
+                return 6;
+            if (SM || USUM)
+                return 7;
+            return -1;
+        }
+    }
+
+    public bool IsRebuildable(int fileCount)
+    {
+        return fileCount switch
+        {
+            FILECOUNT_XY => Version == GameVersion.XY,
+            FILECOUNT_ORAS => Version == GameVersion.ORAS,
+            FILECOUNT_ORASDEMO => Version == GameVersion.ORASDEMO,
+            FILECOUNT_SMDEMO => Version == GameVersion.SMDEMO,
+            FILECOUNT_SM => Version is GameVersion.SM or GameVersion.SN or GameVersion.MN,
+            FILECOUNT_USUM => Version is GameVersion.USUM or GameVersion.US or GameVersion.UM,
+            _ => false,
+        };
+    }
+}

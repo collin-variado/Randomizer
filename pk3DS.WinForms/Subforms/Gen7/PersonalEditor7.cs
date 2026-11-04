@@ -1,0 +1,1770 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Media;
+using System.Text;
+using System.Windows.Forms;
+using System.Text.Json;
+using pk3DS.Core;
+using pk3DS.Core.CTR;
+using pk3DS.Core.Structures.PersonalInfo;
+using pk3DS.Core.Randomizers;
+using pk3DS.WinForms.Controls;
+
+namespace pk3DS.WinForms;
+
+public partial class PersonalEditor7 : Form
+{
+    private int[][] vanillaStats;
+    
+    public byte[][] Learnsets => learnsets;
+    public byte[][] EggMoves => eggmoves;
+    public byte[][] EvolutionFiles => evolutionFiles;
+    public byte[][] EvolutionBaseFiles => evolutionBaseFiles;
+    private byte[][] learnsets;
+    private byte[][] eggmoves;
+    private byte[][] evolutionFiles;
+    private byte[][] evolutionBaseFiles;
+    public PersonalEditor7(byte[][] infiles, byte[][] learnsets, byte[][] eggmoves, byte[][] evolutionFiles, byte[][] evolutionBaseFiles = null)
+    {
+        InitializeComponent();
+        this.learnsets = learnsets;
+        this.eggmoves = eggmoves;
+        this.evolutionFiles = evolutionFiles;
+        this.evolutionBaseFiles = evolutionBaseFiles;
+        this.FormClosing += new System.Windows.Forms.FormClosingEventHandler(this.Form_Closing);
+        RTB_Changelog.ReadOnly = true;
+        RTB_Changelog.Dock = DockStyle.Fill;
+        helditem_boxes = [CB_HeldItem1, CB_HeldItem2, CB_HeldItem3];
+        ability_boxes = [CB_Ability1, CB_Ability2, CB_Ability3];
+        typing_boxes = [CB_Type1, CB_Type2];
+        eggGroup_boxes = [CB_EggGroup1, CB_EggGroup2];
+        byte_boxes = [TB_BaseHP, TB_BaseATK, TB_BaseDEF, TB_BaseSPA, TB_BaseSPD, TB_BaseSPE, TB_Gender, TB_HatchCycles, TB_Friendship, TB_CatchRate, TB_CallRate,
+        ];
+        ev_boxes = [TB_HPEVs, TB_ATKEVs, TB_DEFEVs, TB_SPEEVs, TB_SPAEVs, TB_SPDEVs];
+        rstat_boxes = [CHK_rHP, CHK_rATK, CHK_rDEF, CHK_rSPE, CHK_rSPA, CHK_rSPD];
+        files = (byte[][])infiles.Clone();
+        originalFiles = files.Select(a => (byte[])a.Clone()).ToArray(); // Snapshots YOUR custom ROM data
+        LoadVanillaStats();
+        
+        foreach (var tb in byte_boxes) tb.TextAlign = HorizontalAlignment.Center;
+        foreach (var tb in ev_boxes) tb.TextAlign = HorizontalAlignment.Center;
+        TB_BST.TextAlign = TB_BaseExp.TextAlign = TB_Height.TextAlign = TB_Weight.TextAlign = 
+        TB_FormeCount.TextAlign = TB_FormeSprite.TextAlign = TB_Stage.TextAlign = HorizontalAlignment.Center;
+
+        // Bind dynamic updates for the Stat Diff calculator
+        TB_BaseHP.TextChanged += UpdateDynamicDiff;
+        TB_BaseATK.TextChanged += UpdateDynamicDiff;
+        TB_BaseDEF.TextChanged += UpdateDynamicDiff;
+        TB_BaseSPA.TextChanged += UpdateDynamicDiff;
+        TB_BaseSPD.TextChanged += UpdateDynamicDiff;
+        TB_BaseSPE.TextChanged += UpdateDynamicDiff;
+
+        TB_BaseHP.TextChanged += (s, e) => { if (int.TryParse(TB_BaseHP.Text, out int v)) StatBar_HP.Value = v; };
+        TB_BaseATK.TextChanged += (s, e) => { if (int.TryParse(TB_BaseATK.Text, out int v)) StatBar_ATK.Value = v; };
+        TB_BaseDEF.TextChanged += (s, e) => { if (int.TryParse(TB_BaseDEF.Text, out int v)) StatBar_DEF.Value = v; };
+        TB_BaseSPA.TextChanged += (s, e) => { if (int.TryParse(TB_BaseSPA.Text, out int v)) StatBar_SPA.Value = v; };
+        TB_BaseSPD.TextChanged += (s, e) => { if (int.TryParse(TB_BaseSPD.Text, out int v)) StatBar_SPD.Value = v; };
+        TB_BaseSPE.TextChanged += (s, e) => { if (int.TryParse(TB_BaseSPE.Text, out int v)) StatBar_SPE.Value = v; };
+
+        species[0] = "---";
+        abilities[0] = items[0] = moves[0] = "";
+        var altForms = Main.Config.Personal.GetFormList(species, Main.Config.MaxSpeciesID);
+        entryNames = Main.Config.Personal.GetPersonalEntryList(altForms, species, Main.Config.MaxSpeciesID, out baseForms, out formVal);
+        TMs = TMEditor7.GetTMHMList();
+
+        B_GenerateDiff.Click += (s, e) => GenerateFullChangelog();
+        B_CopyPage1.Click += B_CopyPage1_Click;
+        B_PastePage1.Click += B_PastePage1_Click;
+        B_MaxCatch.Click += B_MaxCatch_Click;
+        B_MaxCatchAll.Click += B_MaxCatchAll_Click;
+        B_ZeroHatch.Click += B_ZeroHatch_Click;
+        B_ZeroHatchAll.Click += B_ZeroHatchAll_Click;
+        B_JumpLevelUp.Click += (s, e) => {
+            SaveEntry();
+            var ed = new LevelUpEditor7(learnsets) { StartSpecies = CB_Species.SelectedIndex };
+            WinFormsUtil.ApplyTheme(ed);
+            ed.ShowDialog();
+            ReadEntry();
+        };
+        B_JumpEggMoves.Click += (s, e) => {
+            SaveEntry();
+            var ed = new EggMoveEditor7(eggmoves) { StartSpecies = CB_Species.SelectedIndex };
+            WinFormsUtil.ApplyTheme(ed);
+            ed.ShowDialog();
+            ReadEntry();
+        };
+        TC_Pokemon.SelectedIndexChanged += (s, e) =>
+        {
+            string tab = TC_Pokemon.SelectedTab.Text;
+            PB_MonSprite.Visible = TC_Pokemon.SelectedIndex == 0 || tab.Contains("Tutor");
+            if (tab == "Changelog")
+            {
+                SaveEntry();
+                GenerateFullChangelog();
+            }
+        };
+        CB_ZItem.SelectedIndexChanged += (s, e) => { if (!reading && !LazyCombo.IsExpanding(CB_ZItem)) SaveEntry(); };
+        CB_ZBaseMove.SelectedIndexChanged += (s, e) => { if (!reading && !LazyCombo.IsExpanding(CB_ZBaseMove)) SaveEntry(); };
+        CB_ZMove.SelectedIndexChanged += (s, e) => { if (!reading && !LazyCombo.IsExpanding(CB_ZMove)) SaveEntry(); };
+        B_SaveCurrent.Click += (s, e) => { SaveEntry(); WinFormsUtil.Alert("Current Pokémon saved to internal buffer."); };
+
+        RegisterAutosave(TP_General.Controls);
+        CB_Type1.SelectedIndexChanged += UpdateTypeIcons;
+        CB_Type2.SelectedIndexChanged += UpdateTypeIcons;
+        // This whole tutor block used to start at x=300 - a bare 81px gap past the TMs list
+        // (which ends at x=219), well clear of everything else on the tab - and CLB_BeachTutors'
+        // old 490px width ran to x=790, past TC_Pokemon's real 732px client width. Both together
+        // made "Copy Tutors"/"Paste Tutors" (and everything else in this cluster) read as
+        // detached and pushed off to the right. Shifted the whole block to x=235 (right after the
+        // TM list, same 16px gap CLB_MoveTutors uses elsewhere) and narrowed the two wide controls
+        // so nothing runs past the tab's actual width.
+        NUD_TutorBase = new NumericUpDown
+        {
+            Minimum = 0x28, Maximum = 0x2F, Hexadecimal = true,
+            Value = 0x29, Location = new Point(305, 370), Size = new Size(50, 20),
+            Enabled = false // Locked — ASM patch expects base 0x29
+        };
+        L_TutorBase = new Label { Text = "Base:", Location = new Point(235, 373), Size = new Size(70, 20) };
+        B_AlignTutors = new Button {
+            Text = "Align",
+            Location = new Point(365, 366),
+            Size = new Size(55, 26),
+            FlatStyle = FlatStyle.Flat,
+            ForeColor = Color.White,
+            BackColor = Color.FromArgb(0, 150, 136),
+            Cursor = Cursors.Hand
+        };
+        B_AlignTutors.FlatAppearance.BorderSize = 0;
+        L_ContinuousTutors = new CheckBox { Text = "Continuous Mapping (ASM)", Location = new Point(430, 370), Size = new Size(200, 20), Checked = true, Enabled = false };
+
+        TP_MoveTutors.Controls.Add(L_TutorBase);
+        TP_MoveTutors.Controls.Add(NUD_TutorBase);
+        TP_MoveTutors.Controls.Add(B_AlignTutors);
+        TP_MoveTutors.Controls.Add(L_ContinuousTutors);
+
+        B_CopyTutors = new Button {
+            Text = "📋 Copy Tutors",
+            Location = new Point(235, 405),
+            Size = new Size(130, 30),
+            FlatStyle = FlatStyle.Flat,
+            ForeColor = Color.White,
+            BackColor = Color.FromArgb(52, 73, 94),
+            Cursor = Cursors.Hand
+        };
+        B_CopyTutors.FlatAppearance.BorderSize = 0;
+
+        B_PasteTutors = new Button {
+            Text = "📥 Paste Tutors",
+            Location = new Point(375, 405),
+            Size = new Size(130, 30),
+            FlatStyle = FlatStyle.Flat,
+            ForeColor = Color.White,
+            BackColor = Color.FromArgb(52, 73, 94),
+            Cursor = Cursors.Hand
+        };
+        B_PasteTutors.FlatAppearance.BorderSize = 0;
+        B_CopyTutors.Click += B_CopyTutors_Click;
+        B_PasteTutors.Click += B_PasteTutors_Click;
+        TP_MoveTutors.Controls.Add(B_CopyTutors);
+        TP_MoveTutors.Controls.Add(B_PasteTutors);
+
+        B_AlignTutors.Click += B_AlignTutors_Click;
+        L_NewTutors.Visible = false;
+        L_Special.Visible = false; // Get rid of Special Tutors text
+        CLB_NewTutors.Visible = false;
+        CLB_BeachTutors.Location = new Point(235, 35);
+        CLB_BeachTutors.Width = 425;
+        CLB_BeachTutors.Height = 275;
+        CLB_BeachTutors.MultiColumn = true;
+        CLB_BeachTutors.ColumnWidth = 150;
+
+        L_DebugTutors = new RichTextBox
+        {
+            ReadOnly = true,
+            BackColor = Color.Black,
+            ForeColor = Color.Yellow,
+            Font = new Font("Consolas", 8),
+            Location = new Point(235, 315),
+            Size = new Size(425, 45),
+            BorderStyle = BorderStyle.None
+        };
+        TP_MoveTutors.Controls.Add(L_DebugTutors);
+
+        Setup();
+        LoadVanillaStats();
+        if (CB_Species.Items.Count > 1) CB_Species.SelectedIndex = 1;
+        RandSettings.GetFormSettings(this, TP_Randomizer.Controls);
+    }
+
+
+
+    private void RegisterAutosave(Control.ControlCollection controls)
+    {
+        foreach (Control c in controls)
+        {
+            if (c is ComboBox cb) cb.SelectedIndexChanged += (s, e) => { if (!reading && !LazyCombo.IsExpanding(cb)) SaveEntry(false); };
+            else if (c is CheckBox chk) chk.CheckedChanged += (s, e) => { if (!reading) SaveEntry(false); };
+            else if (c is NumericUpDown nud) nud.ValueChanged += (s, e) => { if (!reading) SaveEntry(false); };
+            
+            if (c.HasChildren) RegisterAutosave(c.Controls);
+        }
+    }
+
+    private void InitializeMoveTutors()
+    {
+        string croPath = Path.Combine(Main.RomFSPath, "Shop.cro");
+        var tutorData = TutorEditor7.GetUSUMTutorData(croPath, Tutors_USUM);
+        
+        CLB_MoveTutors.Items.Clear();
+        CLB_BeachTutors.Items.Clear();
+        
+        L_Special.Visible = CLB_MoveTutors.Visible = true;
+        L_Special.Text = "Special Tutors:";
+        L_Special.Location = new Point(230, 5);
+        CLB_MoveTutors.Location = new Point(233, 25);
+        CLB_MoveTutors.Size = new Size(160, 280);
+        CLB_MoveTutors.MultiColumn = false;
+
+        L_BeachTutors.Visible = CLB_BeachTutors.Visible = true;
+        L_BeachTutors.Text = "Beach Tutors:";
+        L_BeachTutors.Location = new Point(410, 5);
+        CLB_BeachTutors.Location = new Point(413, 25);
+        CLB_BeachTutors.Size = new Size(240, 280);
+        CLB_BeachTutors.MultiColumn = false;
+
+        List<int> beachMap = [];
+        int baseOfs = (int)NUD_TutorBase.Value;
+        int startBit = (baseOfs - 0x28) * 32;
+
+        // 1. Add Special Tutors (Always Bits 0-7)
+        for (int i = 0; i < tutormoves.Length; i++)
+        {
+            int moveID = tutormoves[i];
+            string name = moveID < moves.Length ? moves[moveID] : $"Move {moveID}";
+            CLB_MoveTutors.Items.Add($"[{moveID:000}] {name}");
+        }
+
+        // 2. Add Tutors directly from the currently loaded CRO data!
+        var shopTutors = tutorData.moves;
+        for (int i = 0; i < shopTutors.Length; i++)
+        {
+            int moveID = shopTutors[i];
+            string name = moveID < moves.Length ? moves[moveID] : $"Move {moveID}";
+            
+            // Mark expansion moves (past vanilla 67) with a star
+            if (i >= 67)
+                CLB_BeachTutors.Items.Add($"* [{moveID:000}] {name}");
+            else
+                CLB_BeachTutors.Items.Add($"[{moveID:000}] {name}");
+                
+            beachMap.Add(startBit + i);
+        }
+        Tutors_Beach_Map = beachMap.ToArray();
+    }
+    // Removed redundant handler
+    #region Global Variables
+    public byte[][] Files => files;
+    private byte[][] files;
+
+    private readonly string[] items = Main.Config.GetText(TextName.ItemNames);
+    private readonly string[] moves = Main.Config.GetText(TextName.MoveNames);
+    private string[] species = Main.Config.GetText(TextName.SpeciesNames);
+    private readonly string[] abilities = Main.Config.GetText(TextName.AbilityNames);
+    //private readonly string[] forms = Main.Config.GetText(TextName.Forms);
+    private readonly string[] types = Main.Config.GetText(TextName.Types);
+
+    private readonly ComboBox[] helditem_boxes;
+    private readonly ComboBox[] ability_boxes;
+    private readonly ComboBox[] typing_boxes;
+    private readonly ComboBox[] eggGroup_boxes;
+
+    private readonly MaskedTextBox[] byte_boxes;
+    private readonly MaskedTextBox[] ev_boxes;
+    private readonly CheckBox[] rstat_boxes;
+
+    private readonly string[] eggGroups = ["---", "Monster", "Water 1", "Bug", "Flying", "Field", "Fairy", "Grass", "Human-Like", "Water 3", "Mineral", "Amorphous", "Water 2", "Ditto", "Dragon", "Undiscovered",
+    ];
+    private readonly string[] EXPGroups = ["Medium-Fast", "Erratic", "Fluctuating", "Medium-Slow", "Fast", "Slow"];
+    private readonly string[] colors = ["Red", "Blue", "Yellow", "Green", "Black", "Brown", "Purple", "Gray", "White", "Pink",
+    ];
+    private readonly ushort[] tutormoves = [520, 519, 518, 338, 307, 308, 434, 620];
+
+    internal static readonly int[] Tutors_USUM =
+    [
+        450, 343, 162, 530, 324, 442, 402, 529, 340, 067, 441, 253, 009, 007, 008,
+        277, 335, 414, 492, 356, 393, 334, 387, 276, 527, 196, 401, 428, 406, 304, 231,
+        020, 173, 282, 235, 257, 272, 215, 366, 143, 220, 202, 409, 264, 351, 352,
+        380, 388, 180, 495, 270, 271, 478, 472, 283, 200, 278, 289, 446, 285,
+        477, 502, 432, 710, 707, 675, 673,
+    ];
+
+    // Canonical USUM Vanilla Bit Order (Bits 0-66) - Matches Legacy pk3DS Mapping
+    private static readonly int[] Tutors_USUM_Vanilla_Bits =
+    [
+        450, 343, 162, 530, 324, 442, 402, 529, 340, 067, 441, 253, 009, 007, 008, // 0-14
+        277, 335, 414, 492, 356, 393, 334, 387, 276, 527, 196, 401, 428, 406, 304, 231, // 15-30
+        020, 173, 282, 235, 257, 272, 215, 366, 143, 220, 202, 409, 264, 351, 352, // 31-45
+        380, 388, 180, 495, 270, 271, 478, 472, 283, 200, 278, 289, 446, 285, // 46-59
+        477, 502, 432, 710, 707, 675, 673 // 60-66
+    ];
+
+
+    private int[] Tutors_USUM_Lengths = [15, 16, 15, 14, 7];
+
+    private int[] baseForms, formVal;
+    private string[] entryNames;
+    private readonly ushort[] TMs;
+    private int entry = -1;
+    private NumericUpDown NUD_TutorBase;
+    private Button B_AlignTutors;
+    private Button B_CopyTutors;
+    private Button B_PasteTutors;
+    private Label L_TutorBase;
+    private CheckBox L_ContinuousTutors;
+    private RichTextBox L_DebugTutors;
+    private int[] Tutors_Beach_Map;
+    private static bool[] ClipboardTMs;
+    private static bool[] ClipboardTutors;
+    private static bool[] ClipboardBeachTutors;
+    private readonly byte[][] originalFiles;
+    #endregion
+    
+    private Image typeSprites;
+    private void LoadTypeSprites()
+    {
+        string path = Path.Combine(Application.StartupPath, "Resources", "img", "type_sprites.png");
+        if (!File.Exists(path))
+            path = Path.Combine(Application.StartupPath, "type_sprites.png");
+        if (File.Exists(path)) 
+            typeSprites = Image.FromFile(path);
+    }
+    
+    private Image GetTypeImage(int typeId)
+    {
+        if (typeSprites == null) return null;
+        Rectangle src;
+        if (typeSprites.Width >= 576) src = new Rectangle(typeId * 32, 0, 32, 14);
+        else if (typeSprites.Width == 192) src = new Rectangle((typeId % 6) * 32, (typeId / 6) * 14, 32, 14);
+        else src = new Rectangle(0, typeId * 14, 32, 14);
+        
+        Bitmap bmp = new Bitmap(32, 14);
+        using (Graphics g = Graphics.FromImage(bmp))
+            g.DrawImage(typeSprites, new Rectangle(0, 0, 32, 14), src, GraphicsUnit.Pixel);
+        return bmp;
+    }
+    
+    private void UpdateTypeIcons(object sender, EventArgs e)
+    {
+        if (reading) return;
+        if (PB_Type1.Image != null) { PB_Type1.Image.Dispose(); }
+        if (PB_Type2.Image != null) { PB_Type2.Image.Dispose(); }
+        PB_Type1.Image = GetTypeImage(CB_Type1.SelectedIndex);
+        PB_Type2.Image = GetTypeImage(CB_Type2.SelectedIndex);
+    }
+
+    private bool reading;
+    private int tutorBase = 0x29;
+    private void Setup()
+    {
+        reading = true;
+        if (typeSprites == null) LoadTypeSprites();
+        if (Main.Config.USUM)
+        {
+            tutorBase = 0x29;
+            NUD_TutorBase.Value = tutorBase;
+        }
+
+        CLB_TM.Items.Clear();
+        CB_Species.Items.Clear();
+        CLB_MoveTutors.Items.Clear();
+        CLB_BeachTutors.Items.Clear();
+
+        int tmCount = TMs.Length > 0 ? Math.Min(TMs.Length, 128) : 100;
+        if (pk3DS.Core.Modding.PassiveGuard.Enabled) tmCount = Math.Min(tmCount, pk3DS.Core.Modding.PassiveGuard.TmCap); // bits 104-127 are passives
+
+        if (TMs.Length == 0) // No ExeFS to grab TMs from - names unavailable, so number them.
+        {
+            for (int i = 1; i <= tmCount; i++)
+                CLB_TM.Items.Add($"TM{i:00}");
+        }
+        else // Use TM moves.
+        {
+            for (int i = 1; i <= tmCount; i++)
+            {
+                string name = (i - 1 < TMs.Length && TMs[i - 1] < moves.Length) ? moves[TMs[i - 1]] : "---";
+                CLB_TM.Items.Add($"TM{i:00} {name}");
+            }
+        }
+        foreach (ushort m in tutormoves)
+            CLB_MoveTutors.Items.Add(moves[m]);
+
+        var _customNames = CustomNameEditor.LoadCustomNames();
+        for (int i = 0; i < entryNames.Length; i++)
+        {
+            string displayName = _customNames.TryGetValue(i, out string cn) ? cn : entryNames[i];
+            CB_Species.Items.Add($"{displayName} - {i:000}");
+        }
+
+        CB_Species.AutoCompleteMode = AutoCompleteMode.Suggest;
+        CB_Species.AutoCompleteSource = AutoCompleteSource.ListItems;
+
+        foreach (ComboBox cb in helditem_boxes)
+        {
+            cb.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
+            cb.AutoCompleteSource = AutoCompleteSource.ListItems;
+            LazyCombo.Attach(cb, items);
+        }
+
+        LazyCombo.Attach(CB_ZItem, items);
+        CB_ZItem.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
+        CB_ZItem.AutoCompleteSource = AutoCompleteSource.ListItems;
+
+        LazyCombo.Attach(CB_ZBaseMove, moves);
+        CB_ZBaseMove.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
+        CB_ZBaseMove.AutoCompleteSource = AutoCompleteSource.ListItems;
+
+        LazyCombo.Attach(CB_ZMove, moves);
+        CB_ZMove.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
+        CB_ZMove.AutoCompleteSource = AutoCompleteSource.ListItems;
+
+        foreach (ComboBox cb in ability_boxes)
+        {
+            cb.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
+            cb.AutoCompleteSource = AutoCompleteSource.ListItems;
+            LazyCombo.Attach(cb, abilities);
+        }
+
+        InitializePassiveRows();
+
+        foreach (ComboBox cb in typing_boxes)
+        {
+            cb.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
+            cb.AutoCompleteSource = AutoCompleteSource.ListItems;
+            cb.Items.AddRange(types);
+        }
+
+        foreach (ComboBox cb in eggGroup_boxes)
+        {
+            cb.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
+            cb.AutoCompleteSource = AutoCompleteSource.ListItems;
+            cb.Items.AddRange(eggGroups);
+        }
+
+        CB_Color.Items.AddRange(colors);
+        CB_Color.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
+        CB_Color.AutoCompleteSource = AutoCompleteSource.ListItems;
+
+        CB_EXPGroup.Items.AddRange(EXPGroups);
+        CB_EXPGroup.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
+        CB_EXPGroup.AutoCompleteSource = AutoCompleteSource.ListItems;
+        if (Main.Config.USUM)
+        {
+            InitializeMoveTutors();
+        }
+
+        CLB_BeachTutors.ItemCheck += (s, e) => { if (!reading) BeginInvoke(new Action(() => SaveEntry(false))); };
+        CLB_NewTutors.ItemCheck += (s, e) => { if (!reading) BeginInvoke(new Action(() => SaveEntry(false))); };
+        CLB_MoveTutors.ItemCheck += (s, e) => { if (!reading) BeginInvoke(new Action(() => SaveEntry(false))); };
+        CLB_TM.ItemCheck += (s, e) => { 
+            if (!reading) 
+            { 
+                if (e.Index >= 0 && e.Index < pkm.TMHM.Length)
+                    pkm.TMHM[e.Index] = (e.NewValue == CheckState.Checked);
+                BeginInvoke(new Action(() => SaveEntry(false))); 
+            } 
+        };
+
+        // toggle usum content
+        CHK_BeachTutors.Checked = CHK_BeachTutors.Visible =
+            CLB_BeachTutors.Visible = CLB_BeachTutors.Enabled = L_BeachTutors.Visible = Main.Config.USUM;
+        
+        reading = false;
+        if (entry > -1 && entry < CB_Species.Items.Count) CB_Species.SelectedIndex = entry;
+    }
+
+    private void CB_Species_SelectedIndexChanged(object sender, EventArgs e)
+    {
+        if (reading || dumping) return;
+        if (entry > -1 && entry < files.Length) SaveEntry();
+        entry = CB_Species.SelectedIndex;
+        if (entry < 0 || entry >= files.Length)
+            return;
+        ReadEntry();
+    }
+
+    private void B_InsertForm_Click(object sender, EventArgs e)
+    {
+        var romKind = pk3DS.Core.Modding.Insertion.RomLayout.DetectFromRomFs(Main.RomFSPath, out _, out _);
+        var refusal = pk3DS.Core.Modding.Insertion.RomLayout.Refusal(
+            pk3DS.Core.Modding.UhuruGuard.Active ? pk3DS.Core.Modding.Insertion.RomKind.Uhuru : romKind,
+            species: false);
+        if (refusal != null)
+        {
+            WinFormsUtil.Error(refusal);
+            return;
+        }
+
+        if (entry < 1) return;
+        if (entry > -1) SaveEntry(); // save current entry before insertion
+        
+        using var form = new FormInsertion(files, evolutionFiles ?? new byte[files.Length][], learnsets ?? new byte[files.Length][], eggmoves ?? new byte[files.Length][], species, entryNames, baseForms, formVal);
+        WinFormsUtil.ApplyTheme(form);
+        if (form.ShowDialog() != DialogResult.OK)
+            return;
+
+        // ── Phase 1: Update in-memory arrays ──
+        // Filter out the Master Table from the result if it was accidentally carried over
+        int entryLen = form.ResultPersonal[0].Length;
+        files = form.ResultPersonal.Where(f => f != null && f.Length == entryLen).ToArray();
+        evolutionFiles = form.ResultEvolution;
+        learnsets = form.ResultLevelUp;
+        eggmoves = form.ResultEggMoves;
+
+        // The insertion pipeline has already committed the staged tables. Re-read its output into
+        // the editor's live configuration before rebuilding the derived views.
+        Main.Config.InitializePersonal();
+        Main.Config.InitializeLearnset();
+        Main.Config.InitializeEvos();
+        Main.Config.Info?.RecalculateLimits(Main.Config);
+        
+        // Refresh names reference from config (it was expanded in FormInsertion)
+        species = Main.Config.GetText(TextName.SpeciesNames);
+
+        // Rebuild the global species stat table from the updated personal files
+        Main.Config.Personal.Table = files.Select(f => PersonalTable.GetInfo(f, Main.Config.Version)).ToArray();
+        var altForms = Main.Config.Personal.GetFormList(species, Main.Config.MaxSpeciesID);
+        entryNames = Main.Config.Personal.GetPersonalEntryList(altForms, species, Main.Config.MaxSpeciesID, out baseForms, out formVal);
+
+        // ── Phase 4: Resort if requested ──
+
+        // ── Phase 5: Refresh the UI ──
+        Setup();
+        WinFormsUtil.Alert("Form insertion complete!", "All GARCs saved. Internal tables refreshed.");
+    }
+
+    private void RefreshSpeciesList()
+    {
+        // Re-calculate the list based on current game info
+        var altForms = Main.Config.Personal.GetFormList(species, Main.Config.MaxSpeciesID);
+        var res = Main.Config.Personal.GetPersonalEntryList(altForms, species, Main.Config.MaxSpeciesID, out var bf, out var fv);
+        
+        var _customNames2 = CustomNameEditor.LoadCustomNames();
+        CB_Species.Items.Clear();
+        CB_Species.Items.AddRange(res.Select((n, i) => {
+            string displayName = _customNames2.TryGetValue(i, out string cn) ? cn : n;
+            return $"{displayName} - {i:000}";
+        }).ToArray());
+        CB_Species.SelectedIndex = entry;
+    }
+
+    private void InsertNewForm(int index, int sourceIndex)
+    {
+        // Expand all relevant data arrays
+        ExpandArray(ref files, index, sourceIndex);
+        ExpandArray(ref learnsets, index, sourceIndex);
+        ExpandArray(ref eggmoves, index, sourceIndex);
+        ExpandArray(ref evolutionFiles, index, sourceIndex);
+        
+        // Mark for saving
+        // This would normally involve writing back to the GARCs
+    }
+
+    private static void ExpandArray<T>(ref T[][] array, int index, int sourceIndex)
+    {
+        var list = array.ToList();
+        list.Insert(index, (T[])array[sourceIndex].Clone());
+        array = list.ToArray();
+    }
+
+    private void B_Import_Click(object sender, EventArgs e)
+    {
+        var ofd = new OpenFileDialog { Filter = "JSON File|*.json|TM/Tutor CSV|*.csv|Text File (Tab)|*.txt|All Supported|*.json;*.csv;*.txt" };
+        if (ofd.ShowDialog() != DialogResult.OK) return;
+        
+        try
+        {
+            if (ofd.FileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase) ||
+                ofd.FileName.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
+            {
+                ImportTMsTutors(ofd.FileName);
+                return;
+            }
+
+            string json = File.ReadAllText(ofd.FileName);
+            var imported = JsonSerializer.Deserialize<PersonalInfoSM[]>(json);
+            if (imported != null && imported.Length > 0)
+            {
+                for (int i = 1; i < files.Length && i < imported.Length; i++)
+                {
+                    if (imported[i] != null) 
+                    {
+                        Main.SpeciesStat[i] = imported[i];
+                        files[i] = imported[i].Write();
+                    }
+                }
+                ReadEntry();
+                WinFormsUtil.Alert($"Successfully imported {imported.Length} personal entries from JSON.");
+            }
+        }
+        catch (Exception ex) { WinFormsUtil.Error("Failed to import:", ex.Message); }
+    }
+
+    private void ImportTMsTutors(string path)
+    {
+        string[] lines = File.ReadAllLines(path);
+        if (lines.Length < 2) return;
+        
+        // Auto-detect delimiter from header
+        char sep = ',';
+        if (path.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".ts", StringComparison.OrdinalIgnoreCase))
+            sep = '\t';
+        if (lines[0].Contains('\t') && !lines[0].Contains(','))
+            sep = '\t';
+        
+        int count = 0;
+        for (int i = 1; i < lines.Length; i++)
+        {
+            string[] parts = lines[i].Split(sep);
+            if (parts.Length < 2) continue;
+            if (!int.TryParse(parts[0], out int id)) continue;
+            if (id < 0 || id >= Main.SpeciesStat.Length || Main.SpeciesStat[id] == null) continue;
+            
+            var sm = (PersonalInfoSM)Main.SpeciesStat[id];
+            int col = 2; // Skip ID and Name
+            
+            // TMs
+            for (int t = 0; t < CLB_TM.Items.Count; t++)
+            {
+                if (col < parts.Length && t < sm.TMHM.Length)
+                    sm.TMHM[t] = parts[col] == "1";
+                col++;
+            }
+            // Move Tutors (Special)
+            for (int t = 0; t < CLB_MoveTutors.Items.Count && t < 8; t++)
+            {
+                if (col < parts.Length)
+                    sm.TutorFlags[t] = parts[col] == "1";
+                col++;
+            }
+            // Beach Tutors
+            if (CLB_BeachTutors.Visible)
+            {
+                for (int t = 0; t < CLB_BeachTutors.Items.Count; t++)
+                {
+                    int bitPos = GetUSUMBitPos(t);
+                    if (col < parts.Length && bitPos >= 0 && bitPos < sm.TutorFlags.Length)
+                        sm.TutorFlags[bitPos] = parts[col] == "1";
+                    col++;
+                }
+            }
+            files[id] = sm.Write();
+            count++;
+        }
+        ReadEntry();
+        WinFormsUtil.Alert($"Successfully imported {count} TM/Tutor entries.");
+    }
+
+    private void ByteLimiter(object sender, EventArgs e)
+    {
+        if (sender is not MaskedTextBox mtb)
+            return;
+        _ = int.TryParse(mtb.Text, out int val);
+        if (Array.IndexOf(byte_boxes, mtb) > -1 && val > 255)
+            mtb.Text = "255";
+        else if (Array.IndexOf(ev_boxes, mtb) > -1 && val > 3)
+            mtb.Text = "3";
+    }
+
+    private PersonalInfo pkm;
+
+    private static void SetCBIndex(ComboBox cb, int index)
+    {
+        if (cb == null) return;
+        if (LazyCombo.IsLazy(cb))
+        {
+            LazyCombo.SetIndex(cb, index >= 0 && index < LazyCombo.Count(cb) ? index : 0);
+            return;
+        }
+        if (index >= 0 && index < cb.Items.Count)
+            cb.SelectedIndex = index;
+        else
+            cb.SelectedIndex = 0;
+    }
+
+    private void ReadInfo()
+    {
+        pkm = PersonalTable.GetInfo(files[entry], Main.Config.Version);
+        if (pkm == null) return;
+
+        TB_BaseHP.Text = pkm.HP.ToString("000");
+        TB_BaseATK.Text = pkm.ATK.ToString("000");
+        TB_BaseDEF.Text = pkm.DEF.ToString("000");
+        TB_BaseSPE.Text = pkm.SPE.ToString("000");
+        TB_BaseSPA.Text = pkm.SPA.ToString("000");
+        TB_BaseSPD.Text = pkm.SPD.ToString("000");
+
+        StatBar_HP.Value = Math.Clamp(pkm.HP, 0, 255);
+        StatBar_ATK.Value = Math.Clamp(pkm.ATK, 0, 255);
+        StatBar_DEF.Value = Math.Clamp(pkm.DEF, 0, 255);
+        StatBar_SPE.Value = Math.Clamp(pkm.SPE, 0, 255);
+        StatBar_SPA.Value = Math.Clamp(pkm.SPA, 0, 255);
+        StatBar_SPD.Value = Math.Clamp(pkm.SPD, 0, 255);
+        TB_HPEVs.Text = pkm.EV_HP.ToString("0");
+        TB_ATKEVs.Text = pkm.EV_ATK.ToString("0");
+        TB_DEFEVs.Text = pkm.EV_DEF.ToString("0");
+        TB_SPEEVs.Text = pkm.EV_SPE.ToString("0");
+        TB_SPAEVs.Text = pkm.EV_SPA.ToString("0");
+        TB_SPDEVs.Text = pkm.EV_SPD.ToString("0");
+
+        SetCBIndex(CB_Type1, pkm.Types[0]);
+        SetCBIndex(CB_Type2, pkm.Types[1]);
+
+        TB_CatchRate.Text = pkm.CatchRate.ToString("000");
+        TB_Stage.Text = pkm.EvoStage.ToString("0");
+        TB_LowestEvo.Text = evolutionBaseFiles != null && entry < evolutionBaseFiles.Length && evolutionBaseFiles[entry]?.Length >= 2
+            ? BitConverter.ToUInt16(evolutionBaseFiles[entry], 0).ToString()
+            : "";
+
+        SetCBIndex(CB_HeldItem1, pkm.Items[0]);
+        SetCBIndex(CB_HeldItem2, pkm.Items[1]);
+        SetCBIndex(CB_HeldItem3, pkm.Items[2]);
+
+        TB_Gender.Text = pkm.Gender.ToString("000");
+        TB_HatchCycles.Text = pkm.HatchCycles.ToString("000");
+        TB_Friendship.Text = pkm.BaseFriendship.ToString("000");
+
+        SetCBIndex(CB_EXPGroup, pkm.EXPGrowth);
+
+        SetCBIndex(CB_EggGroup1, pkm.EggGroups[0]);
+        SetCBIndex(CB_EggGroup2, pkm.EggGroups[1]);
+
+        SetCBIndex(CB_Ability1, pkm.Abilities[0]);
+        SetCBIndex(CB_Ability2, pkm.Abilities[1]);
+        SetCBIndex(CB_Ability3, pkm.Abilities[2]);
+        if (passive_boxes != null)
+        {
+            var passives = ((PersonalInfoSM)pkm).Passives;
+            for (int i = 0; i < 3; i++) SetCBIndex(passive_boxes[i], Math.Min(passives[i], pk3DS.Core.Modding.PassiveGuard.MaxId)); // a stored id above 345 shows as the last entry
+        }
+
+        TB_FormeCount.Text = pkm.FormeCount.ToString("000");
+        TB_FormeSprite.Text = pkm.FormeSprite.ToString("000");
+
+        TB_RawColor.Text = pkm.Color.ToString("000");
+        SetCBIndex(CB_Color, pkm.Color & 0xF);
+
+        TB_BaseExp.Text = pkm.BaseEXP.ToString("000");
+        TB_BST.Text = pkm.BST.ToString("000");
+
+        TB_Height.Text = ((decimal)pkm.Height / 100).ToString("00.00");
+        TB_Weight.Text = ((decimal)pkm.Weight / 10).ToString("000.0");
+
+        for (int i = 0; i < CLB_TM.Items.Count && i < pkm.TMHM.Length; i++)
+            CLB_TM.SetItemChecked(i, pkm.TMHM[i]);
+
+        PersonalInfoSM sm = (PersonalInfoSM)pkm;
+        TB_CallRate.Text = sm.EscapeRate.ToString("000");
+        TB_CallRate.TextAlign = HorizontalAlignment.Center;
+        SetCBIndex(CB_ZItem, sm.SpecialZ_Item == 65535 ? 0 : sm.SpecialZ_Item);
+        SetCBIndex(CB_ZBaseMove, sm.SpecialZ_BaseMove == 65535 ? 0 : sm.SpecialZ_BaseMove);
+        SetCBIndex(CB_ZMove, sm.SpecialZ_ZMove == 65535 ? 0 : sm.SpecialZ_ZMove);
+        CHK_Variant.Checked = sm.LocalVariant;
+
+        CLB_MoveTutors.Visible = L_Special.Visible = true;
+        for (int i = 0; i < CLB_MoveTutors.Items.Count && i < 8; i++)
+            CLB_MoveTutors.SetItemChecked(i, sm.TutorFlags[i]);
+
+        // Beach Tutors (Standard USUM Island-based mapping + Expansion)
+        for (int i = 0; i < CLB_BeachTutors.Items.Count; i++)
+        {
+            int bitPos = GetUSUMBitPos(i);
+            CLB_BeachTutors.SetItemChecked(i, bitPos >= 0 && bitPos < sm.TutorFlags.Length && sm.TutorFlags[bitPos]);
+        }
+        ReadDexEntry();
+        UpdateDebugLabel(sm);
+        UpdateDynamicDiff(this, EventArgs.Empty);
+    }
+
+    private void UpdateDebugLabel(PersonalInfoSM sm)
+    {
+        if (L_DebugTutors == null) return;
+        byte[] data = sm.Write();
+        byte[] tutorData = data.Skip(0x38).Take(20).ToArray();
+        string hex = "0x38:\n" + BitConverter.ToString(tutorData).Replace("-", " ");
+        L_DebugTutors.Text = hex;
+    }
+
+    private int GetUSUMBitPos(int index)
+    {
+        // Use the absolute map calculated during Setup()
+        if (Tutors_Beach_Map != null && index < Tutors_Beach_Map.Length)
+            return Tutors_Beach_Map[index];
+            
+        return -1;
+    }
+
+    private void ReadDexEntry()
+    {
+        var dexBox = RTB_DexEntry;
+        if (dexBox != null)
+        {
+            dexBox.Text = "";
+            if (Main.Config.USUM || Main.Config.SM)
+            {
+                var dex1 = Main.Config.GetText(TextName.PokedexEntry1);
+                var dex2 = Main.Config.GetText(TextName.PokedexEntry2);
+                int dexIdx = entry;
+                if (entry > Main.Config.MaxSpeciesID && baseForms != null && entry < baseForms.Length) dexIdx = baseForms[entry];
+
+                if (dexIdx < dex1.Length)
+                {
+                    dexBox.Text = dex1[dexIdx].Replace("\\n", "\n").Replace("\\r", "\n");
+                    if (dexIdx < dex2.Length && !string.IsNullOrWhiteSpace(dex2[dexIdx]) && dex2[dexIdx] != dex1[dexIdx])
+                        dexBox.Text += "\n\n" + dex2[dexIdx].Replace("\\n", "\n").Replace("\\r", "\n");
+                }
+            }
+        }
+    }
+
+    private void ReadEntry()
+    {
+        reading = true;
+        try
+        {
+            ReadInfo();
+
+            if (dumping) return;
+            int s = (baseForms != null && entry < baseForms.Length) ? baseForms[entry] : entry;
+            int f = (formVal != null && entry < formVal.Length) ? formVal[entry] : 0;
+            if (entry <= Main.Config.MaxSpeciesID)
+                s = entry;
+                
+            // Use custom name for the header if one has been set
+            var _customNames = CustomNameEditor.LoadCustomNames();
+            string currentName = (entry >= 0 && entry < entryNames.Length && !string.IsNullOrWhiteSpace(entryNames[entry])) 
+                ? entryNames[entry] 
+                : (s >= 0 && s < species.Length && !string.IsNullOrWhiteSpace(species[s]) && species[s] != "---") 
+                    ? species[s] 
+                    : $"Species {entry}";
+
+            // Strip trailing form number for neat header display (e.g. "Tatsugiri 5" -> "Tatsugiri")
+            string cleanHeaderName = currentName;
+            int lastSpace = currentName.LastIndexOf(' ');
+            if (lastSpace > 0 && int.TryParse(currentName.Substring(lastSpace + 1), out _))
+            {
+                cleanHeaderName = currentName.Substring(0, lastSpace);
+            }
+
+            L_SpeciesName.Text = _customNames.TryGetValue(entry, out string cn) ? cn : cleanHeaderName;
+                
+            var rawImg = WinFormsUtil.GetSprite(s, f, 0, 0, Main.Config);
+            if (rawImg != null)
+            {
+                var bigImg = new Bitmap(rawImg.Width * 2, rawImg.Height * 2);
+                for (int x = 0; x < rawImg.Width; x++)
+                {
+                    for (int y = 0; y < rawImg.Height; y++)
+                    {
+                        Color c = rawImg.GetPixel(x, y);
+                        bigImg.SetPixel(2 * x, 2 * y, c);
+                        bigImg.SetPixel((2 * x) + 1, 2 * y, c);
+                        bigImg.SetPixel(2 * x, (2 * y) + 1, c);
+                        bigImg.SetPixel((2 * x) + 1, (2 * y) + 1, c);
+                    }
+                }
+                var oldImg = PB_MonSprite.Image;
+                PB_MonSprite.Image = bigImg;
+                oldImg?.Dispose();
+                rawImg.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error reading entry {entry}: {ex.Message}");
+        }
+        finally
+        {
+            reading = false;
+            UpdateTypeIcons(null, null);
+        }
+    }
+
+    private byte ParseByte(string text) => byte.TryParse(text.Trim(), out byte val) ? val : (byte)0;
+    private ushort ParseUInt16(string text) => ushort.TryParse(text.Trim(), out ushort val) ? val : (ushort)0;
+
+    private void SavePersonal()
+    {
+        pkm.HP = ParseByte(TB_BaseHP.Text);
+        pkm.ATK = ParseByte(TB_BaseATK.Text);
+        pkm.DEF = ParseByte(TB_BaseDEF.Text);
+        pkm.SPE = ParseByte(TB_BaseSPE.Text);
+        pkm.SPA = ParseByte(TB_BaseSPA.Text);
+        pkm.SPD = ParseByte(TB_BaseSPD.Text);
+
+        pkm.EV_HP = ParseByte(TB_HPEVs.Text);
+        pkm.EV_ATK = ParseByte(TB_ATKEVs.Text);
+        pkm.EV_DEF = ParseByte(TB_DEFEVs.Text);
+        pkm.EV_SPE = ParseByte(TB_SPEEVs.Text);
+        pkm.EV_SPA = ParseByte(TB_SPAEVs.Text);
+        pkm.EV_SPD = ParseByte(TB_SPDEVs.Text);
+
+        pkm.CatchRate = ParseByte(TB_CatchRate.Text);
+        pkm.EvoStage = ParseByte(TB_Stage.Text);
+        if (evolutionBaseFiles != null && entry < evolutionBaseFiles.Length && evolutionBaseFiles[entry]?.Length >= 2)
+            BitConverter.GetBytes(ParseUInt16(TB_LowestEvo.Text)).CopyTo(evolutionBaseFiles[entry], 0);
+
+        pkm.Types = [CB_Type1.SelectedIndex, CB_Type2.SelectedIndex];
+        pkm.Items = [LazyCombo.GetIndex(CB_HeldItem1), LazyCombo.GetIndex(CB_HeldItem2), LazyCombo.GetIndex(CB_HeldItem3)];
+
+        pkm.Gender = ParseByte(TB_Gender.Text);
+        pkm.HatchCycles = ParseByte(TB_HatchCycles.Text);
+        pkm.BaseFriendship = ParseByte(TB_Friendship.Text);
+        pkm.EXPGrowth = (byte)CB_EXPGroup.SelectedIndex;
+        pkm.EggGroups = [CB_EggGroup1.SelectedIndex, CB_EggGroup2.SelectedIndex];
+        pkm.Abilities = [LazyCombo.GetIndex(CB_Ability1), LazyCombo.GetIndex(CB_Ability2), LazyCombo.GetIndex(CB_Ability3)];
+
+        pkm.FormeSprite = ParseUInt16(TB_FormeSprite.Text);
+        pkm.FormeCount = ParseByte(TB_FormeCount.Text);
+        pkm.Color = (byte)(ParseByte(CB_Color.SelectedIndex.ToString()) | (ParseByte(TB_RawColor.Text) & 0xF0));
+        pkm.BaseEXP = ParseUInt16(TB_BaseExp.Text);
+
+        _ = decimal.TryParse(TB_Height.Text, out var h);
+        _ = decimal.TryParse(TB_Weight.Text, out var w);
+        pkm.Height = (int)(h * 100);
+        pkm.Weight = (int)(w * 10);
+
+        for (int i = 0; i < CLB_TM.Items.Count && i < pkm.TMHM.Length; i++)
+            pkm.TMHM[i] = CLB_TM.GetItemChecked(i);
+
+        PersonalInfoSM sm = (PersonalInfoSM)pkm;
+        if (passive_boxes != null) sm.Passives = passive_boxes.Select(cb => Math.Max(LazyCombo.GetIndex(cb), 0)).ToArray();
+        // Save Special Tutors (Bits 0-7)
+        for (int i = 0; i < CLB_MoveTutors.Items.Count && i < 8; i++)
+            sm.TutorFlags[i] = CLB_MoveTutors.GetItemChecked(i);
+ 
+        // Save Beach Tutors (Standard + Expansion)
+        for (int i = 0; i < CLB_BeachTutors.Items.Count; i++)
+        {
+            int bitPos = GetUSUMBitPos(i);
+            if (bitPos >= 0 && bitPos < sm.TutorFlags.Length) 
+                sm.TutorFlags[bitPos] = CLB_BeachTutors.GetItemChecked(i);
+        }
+
+        // Save Z-Move data
+        sm.SpecialZ_Item = LazyCombo.GetIndex(CB_ZItem);
+        sm.SpecialZ_BaseMove = LazyCombo.GetIndex(CB_ZBaseMove);
+        sm.SpecialZ_ZMove = LazyCombo.GetIndex(CB_ZMove);
+
+        UpdateDebugLabel(sm);
+
+        // Log significant changes
+        LogChange($"Saved changes for {CB_Species.Text}");
+    }
+
+    private void B_AlignTutors_Click(object sender, EventArgs e)
+    {
+        int newBase = (int)NUD_TutorBase.Value;
+        var dr = WinFormsUtil.Prompt(MessageBoxButtons.YesNoCancel, 
+            "Shift all Pokémon compatibility bits to align with the current Base?\n\n" +
+            "YES: Shift bits from 29 -> 28 (Corrects expansion mismatch)\n" +
+            "NO: Shift bits from 28 -> 29 (Reverts to vanilla display)\n" +
+            "CANCEL: Do nothing.");
+
+        if (dr == DialogResult.Cancel) return;
+        int shift = (dr == DialogResult.Yes) ? -32 : 32;
+
+        int count = 0;
+        for (int i = 0; i < files.Length && i < Main.SpeciesStat.Length; i++)
+        {
+            if (files[i] == null || files[i].Length < 0x50) continue;
+            var sm = new PersonalInfoSM(files[i]);
+            bool[] newBits = new bool[sm.TutorFlags.Length];
+            for (int b = 0; b < sm.TutorFlags.Length; b++)
+            {
+                int oldIdx = b - shift;
+                if (oldIdx >= 0 && oldIdx < sm.TutorFlags.Length)
+                    newBits[b] = sm.TutorFlags[oldIdx];
+            }
+            sm.TutorFlags = newBits;
+            files[i] = sm.Write();
+            Main.SpeciesStat[i] = sm;
+            count++;
+        }
+        tutorBase = newBase;
+        ReadInfo();
+        WinFormsUtil.Alert("Tutor bits shifted and cache refreshed.", $"Successfully aligned {count} Pokémon.");
+    }
+
+    private void LogChange(string text)
+    {
+        if (RTB_Changelog == null) return;
+        RTB_Changelog.AppendText($"[{DateTime.Now:HH:mm:ss}] {text}{Environment.NewLine}");
+    }
+
+
+    private ComboBox[] passive_boxes;
+
+    private void InitializePassiveRows()
+    {
+        if (!pk3DS.Core.Modding.PassiveGuard.Enabled || passive_boxes != null) return;
+        var names = new string[pk3DS.Core.Modding.PassiveGuard.MaxId + 1];
+        for (int i = 0; i < names.Length; i++)
+            names[i] = i == 0 ? "(None)" : i < abilities.Length ? abilities[i] : $"Ability {i}";
+
+        var tab = new TabPage("Passives") { Name = "TP_Passives" };
+        tab.Controls.Add(new Label
+        {
+            AutoSize = true,
+            MaximumSize = new Size(640, 0),
+            Location = new Point(20, 20),
+            Text = "Passive abilities (Rom Nueva +): up to three fixed abilities this Pokémon always has, on top of its normal one.\n\n" +
+                   "The game ignores a slot that is empty, a duplicate, equal to a normal ability, or above id 345, and ids 322-345 " +
+                   "(combined abilities) do nothing as a passive. Pick the species at the top, then set its passives here.",
+        });
+        passive_boxes = new ComboBox[3];
+        for (int i = 0; i < 3; i++)
+        {
+            tab.Controls.Add(new Label { Text = $"Passive {i + 1}:", AutoSize = true, Location = new Point(20, 124 + i * 36) });
+            var cb = passive_boxes[i] = new ComboBox
+            {
+                Name = $"CB_Passive{i + 1}",
+                Location = new Point(100, 120 + i * 36),
+                Size = new Size(220, 21),
+                AutoCompleteMode = AutoCompleteMode.SuggestAppend,
+                AutoCompleteSource = AutoCompleteSource.ListItems,
+            };
+            LazyCombo.Attach(cb, names);
+            LazyCombo.SetIndex(cb, 0);
+            cb.SelectedIndexChanged += (s, e) => { if (!reading && !LazyCombo.IsExpanding(cb)) SaveEntry(false); };
+            tab.Controls.Add(cb);
+        }
+        TC_Pokemon.TabPages.Insert(1, tab);
+    }
+
+    private void SaveEntry(bool updateChangelog = true)
+    {
+        if (entry < 0 || entry >= files.Length || pkm == null) return;
+        SavePersonal();
+        byte[] edits = pkm.Write();
+        files[entry] = edits;
+        if (entry < Main.SpeciesStat.Length)
+            Main.SpeciesStat[entry] = pkm;
+        // Changelog generation removed to prevent UI locking on autosave
+
+    }
+
+    private void B_RandomizeCurrent_Click(object sender, EventArgs e)
+    {
+        if (entry < 0) return;
+        var rnd = new PersonalRandomizer(Main.SpeciesStat, Main.Config)
+        {
+            TypeCount = CB_Type1.Items.Count,
+            ModifyCatchRate = CHK_CatchRate.Checked,
+            ModifyEggGroup = CHK_EggGroup.Checked,
+            ModifyStats = CHK_Stats.Checked,
+            ShuffleStats = CHK_Shuffle.Checked,
+            StatsToRandomize = rstat_boxes.Select(g => g.Checked).ToArray(),
+            ModifyAbilities = CHK_Ability.Checked,
+            ModifyLearnsetTM = CHK_TM.Checked,
+            ModifyLearnsetHM = false,
+            ModifyLearnsetTypeTutors = CHK_Tutors.Checked,
+            ModifyLearnsetMoveTutors = Main.Config.USUM && CHK_BeachTutors.Checked,
+            ModifyTypes = CHK_Type.Checked,
+            ModifyHeldItems = CHK_Item.Checked,
+            SameTypeChance = NUD_TypePercent.Value,
+            SameEggGroupChance = NUD_Egg.Value,
+            StatDeviation = NUD_StatDev.Value,
+            AllowWonderGuard = CHK_WGuard.Checked,
+        };
+
+        rnd.Randomize(pkm, entry);
+        files[entry] = pkm.Write();
+        if (entry < Main.SpeciesStat.Length)
+            Main.SpeciesStat[entry] = pkm;
+        ReadEntry();
+    }
+
+    private void B_RandomizeAll_Click(object sender, EventArgs e)
+    {
+        if (WinFormsUtil.Prompt(MessageBoxButtons.YesNo, "Randomize all? Cannot undo.", "Double check Randomization settings in the Randomizer tab.") != DialogResult.Yes)
+            return;
+        if (entry > -1) SaveEntry();
+        // input settings
+        var table = files.Select(f => PersonalTable.GetInfo(f, Main.Config.Version)).ToArray();
+        var rnd = new PersonalRandomizer(table, Main.Config)
+        {
+            TypeCount = CB_Type1.Items.Count,
+            ModifyCatchRate = CHK_CatchRate.Checked,
+            ModifyEggGroup = CHK_EggGroup.Checked,
+            ModifyStats = CHK_Stats.Checked,
+            ShuffleStats = CHK_Shuffle.Checked,
+            StatsToRandomize = rstat_boxes.Select(g => g.Checked).ToArray(),
+            ModifyAbilities = CHK_Ability.Checked,
+            ModifyLearnsetTM = CHK_TM.Checked,
+            ModifyLearnsetHM = false, // no HMs in Gen 7
+            ModifyLearnsetTypeTutors = CHK_Tutors.Checked,
+            ModifyLearnsetMoveTutors = Main.Config.USUM && CHK_BeachTutors.Checked,
+            ModifyTypes = CHK_Type.Checked,
+            ModifyHeldItems = CHK_Item.Checked,
+            SameTypeChance = NUD_TypePercent.Value,
+            SameEggGroupChance = NUD_Egg.Value,
+            StatDeviation = NUD_StatDev.Value,
+            AllowWonderGuard = CHK_WGuard.Checked,
+        };
+
+        rnd.Execute();
+        for (int i = 0; i < files.Length && i < table.Length; i++)
+        {
+            files[i] = table[i].Write();
+            if (i < Main.SpeciesStat.Length)
+                Main.SpeciesStat[i] = table[i];
+        }
+
+        ReadEntry();
+        WinFormsUtil.Alert("Randomized all Pokémon Personal data entries according to specification!", "Press the Export All button to view the new Personal data!");
+    }
+
+    private void B_ModifyAll(object sender, EventArgs e)
+    {
+        if (WinFormsUtil.Prompt(MessageBoxButtons.YesNo, "Modify all? Cannot undo.", "Double check Modification settings in the Randomizer tab.") != DialogResult.Yes) return;
+        if (entry > -1) SaveEntry();
+
+        for (int i = 1; i < CB_Species.Items.Count; i++)
+        {
+            CB_Species.SelectedIndex = i; // Get new Species
+
+            if (CHK_NoEV.Checked)
+            {
+                for (int z = 0; z < 6; z++)
+                    ev_boxes[z].Text = 0.ToString();
+            }
+
+            if (CHK_Growth.Checked)
+                CB_EXPGroup.SelectedIndex = 5;
+            if (CHK_EXP.Checked)
+                TB_BaseExp.Text = ((float)NUD_EXP.Value * (Convert.ToUInt16(TB_BaseExp.Text) / 100f)).ToString("000");
+
+            if (CHK_NoTutor.Checked)
+            {
+                foreach (int tm in CLB_TM.CheckedIndices)
+                    CLB_TM.SetItemCheckState(tm, CheckState.Unchecked);
+                foreach (int mt in CLB_MoveTutors.CheckedIndices)
+                    CLB_MoveTutors.SetItemCheckState(mt, CheckState.Unchecked);
+                foreach (int ao in CLB_BeachTutors.CheckedIndices)
+                    CLB_BeachTutors.SetItemCheckState(ao, CheckState.Unchecked);
+            }
+
+            if (CHK_FullTMCompatibility.Checked)
+            {
+                for (int t = 0; t < CLB_TM.Items.Count; t++)
+                    CLB_TM.SetItemCheckState(t, CheckState.Checked);
+            }
+
+            if (CHK_FullMoveTutorCompatibility.Checked)
+            {
+                for (int m = 0; m < CLB_MoveTutors.Items.Count; m++)
+                    CLB_MoveTutors.SetItemCheckState(m, CheckState.Checked);
+            }
+
+            if (CHK_FullBeachTutorCompatibility.Checked)
+            {
+                for (int m = 0; m < CLB_BeachTutors.Items.Count; m++)
+                    CLB_BeachTutors.SetItemCheckState(m, CheckState.Checked);
+            }
+
+            if (CHK_QuickHatch.Checked)
+                TB_HatchCycles.Text = 1.ToString();
+            if (CHK_CallRate.Checked)
+                TB_CallRate.Text = ((int)NUD_CallRate.Value).ToString();
+            if (CHK_CatchRateMod.Checked)
+                TB_CatchRate.Text = ((int)NUD_CatchRateMod.Value).ToString();
+        }
+        CB_Species.SelectedIndex = 1;
+        WinFormsUtil.Alert("Modified all Pokémon Personal data entries according to specification!", "Press the Export All button to view the new Personal data!");
+    }
+
+    private bool dumping;
+
+    private void B_Export_Click(object sender, EventArgs e)
+    {
+        var sfd = new SaveFileDialog { FileName = "Personal Entries", Filter = "Text File|*.txt|JSON File|*.json|TM/Tutor CSV|*.csv" };
+        if (sfd.ShowDialog() != DialogResult.OK)
+            return;
+
+        SystemSounds.Asterisk.Play();
+
+        if (sfd.FileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                ExportTMsTutors(sfd.FileName);
+            }
+            catch (Exception ex) { WinFormsUtil.Error("CSV Export Failed:", ex.Message); }
+            return;
+        }
+
+        if (sfd.FileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var options = new JsonSerializerOptions { WriteIndented = true };
+                string json = JsonSerializer.Serialize(Main.SpeciesStat, options);
+                File.WriteAllText(sfd.FileName, json);
+                WinFormsUtil.Alert($"Exported all personal data to JSON!");
+            }
+            catch (Exception ex) { WinFormsUtil.Error("JSON Export Failed:", ex.Message); }
+            return;
+        }
+
+        if (entry > -1) SaveEntry();
+        dumping = true;
+        List<string> lines = [];
+        for (int i = 0; i < Math.Min(CB_Species.Items.Count, Math.Min(files.Length, Main.SpeciesStat.Length)); i++)
+        {
+            CB_Species.SelectedIndex = i; // Get new Species
+            if (pkm == null) continue;
+            lines.Add("======");
+            lines.Add($"{entry} - {CB_Species.Text} (Stage: {TB_Stage.Text})");
+            lines.Add("======");
+            lines.Add($"Base Stats: {TB_BaseHP.Text}.{TB_BaseATK.Text}.{TB_BaseDEF.Text}.{TB_BaseSPA.Text}.{TB_BaseSPD.Text}.{TB_BaseSPE.Text} (BST: {pkm.BST})");
+            lines.Add($"EV Yield: {TB_HPEVs.Text}.{TB_ATKEVs.Text}.{TB_DEFEVs.Text}.{TB_SPAEVs.Text}.{TB_SPDEVs.Text}.{TB_SPEEVs.Text}");
+            lines.Add($"Abilities: {CB_Ability1.Text} (1) | {CB_Ability2.Text} (2) | {CB_Ability3.Text} (H)");
+            lines.Add(string.Format(CB_Type1.SelectedIndex != CB_Type2.SelectedIndex
+                ? "Type: {0} / {1}"
+                : "Type: {0}", CB_Type1.Text, CB_Type2.Text));
+
+            lines.Add($"Item 1 (50%): {CB_HeldItem1.Text}");
+            lines.Add($"Item 2 (5%): {CB_HeldItem2.Text}");
+            lines.Add($"Item 3 (1%): {CB_HeldItem3.Text}");
+
+            lines.Add($"EXP Group: {CB_EXPGroup.Text}");
+            lines.Add(string.Format(CB_EggGroup1.SelectedIndex != CB_EggGroup2.SelectedIndex
+                ? "Egg Group: {0} / {1}"
+                : "Egg Group: {0}", CB_EggGroup1.Text, CB_EggGroup2.Text));
+            lines.Add($"Hatch Cycles: {TB_HatchCycles.Text}");
+            lines.Add($"Height: {TB_Height.Text} m, Weight: {TB_Weight.Text} kg, Color: {CB_Color.Text}");
+
+            if (LazyCombo.GetIndex(CB_ZBaseMove) > 0)
+                lines.Add($"{CB_ZBaseMove.Text} + {CB_ZItem.Text} => {CB_ZMove.Text}");
+            lines.Add("");
+        }
+        string path = sfd.FileName;
+        File.WriteAllLines(path, lines, Encoding.Unicode);
+        dumping = false;
+    }
+
+    private void ExportTMsTutors(string path)
+    {
+        // Determine delimiter from extension
+        string sep = ",";
+        if (path.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".ts", StringComparison.OrdinalIgnoreCase))
+            sep = "\t";
+
+        List<string> lines = new List<string>();
+        string header = $"SpeciesID{sep}Pokemon";
+        for (int i = 0; i < CLB_TM.Items.Count; i++) header += $"{sep}TM{i + 1}";
+        for (int i = 0; i < CLB_MoveTutors.Items.Count; i++) header += $"{sep}Tutor{i + 1}";
+        if (CLB_BeachTutors.Visible)
+            for (int i = 0; i < CLB_BeachTutors.Items.Count; i++) header += $"{sep}BeachTutor{i + 1}";
+        lines.Add(header);
+
+        for (int i = 1; i < Main.SpeciesStat.Length; i++)
+        {
+            if (Main.SpeciesStat[i] == null) continue;
+            var sm = (PersonalInfoSM)Main.SpeciesStat[i];
+            
+            string speciesName = i < CB_Species.Items.Count ? CB_Species.Items[i].ToString().Replace(",", "").Replace("\t", "") : $"Entry {i}";
+            string line = $"{i}{sep}{speciesName}";
+            
+            // TMs
+            for (int t = 0; t < CLB_TM.Items.Count; t++)
+            {
+                bool val = t < sm.TMHM.Length && sm.TMHM[t];
+                line += val ? $"{sep}1" : $"{sep}0";
+            }
+            // Move Tutors (Special)
+            for (int t = 0; t < CLB_MoveTutors.Items.Count && t < 8; t++)
+            {
+                bool val = sm.TutorFlags[t];
+                line += val ? $"{sep}1" : $"{sep}0";
+            }
+            // Beach Tutors
+            if (CLB_BeachTutors.Visible)
+            {
+                for (int t = 0; t < CLB_BeachTutors.Items.Count; t++)
+                {
+                    int bitPos = GetUSUMBitPos(t);
+                    bool val = bitPos >= 0 && bitPos < sm.TutorFlags.Length && sm.TutorFlags[bitPos];
+                    line += val ? $"{sep}1" : $"{sep}0";
+                }
+            }
+            lines.Add(line);
+        }
+        File.WriteAllLines(path, lines);
+        WinFormsUtil.Alert("Exported TMs and Tutors successfully!");
+    }
+    private void B_GenerateDiff_Click(object sender, EventArgs e) => GenerateFullChangelog();
+
+
+    private void CHK_Stats_CheckedChanged(object sender, EventArgs e)
+    {
+        L_StatDev.Enabled = NUD_StatDev.Enabled = CHK_Stats.Checked;
+        CHK_rHP.Enabled = CHK_rATK.Enabled = CHK_rDEF.Enabled = CHK_rSPA.Enabled = CHK_rSPD.Enabled = CHK_rSPE.Enabled = CHK_Stats.Checked;
+    }
+
+    private void CHK_Ability_CheckedChanged(object sender, EventArgs e)
+    {
+        CHK_WGuard.Enabled = CHK_Ability.Checked;
+        if (!CHK_WGuard.Enabled)
+            CHK_WGuard.Checked = false;
+    }
+    private void UpdateDynamicDiff(object sender, EventArgs e)
+    {
+        if (pkm == null || entry < 0) return;
+        
+        int.TryParse(TB_BaseHP.Text, out int hp);
+        int.TryParse(TB_BaseATK.Text, out int atk);
+        int.TryParse(TB_BaseDEF.Text, out int def);
+        int.TryParse(TB_BaseSPA.Text, out int spa);
+        int.TryParse(TB_BaseSPD.Text, out int spd);
+        int.TryParse(TB_BaseSPE.Text, out int spe);
+
+        bool isAlt = entry > Main.Config.MaxSpeciesID;
+        int[] origValues = new int[6];
+        string prefix = isAlt ? "Base Form" : "Vanilla";
+
+        if (isAlt && baseForms != null && entry < baseForms.Length && baseForms[entry] >= 0 && baseForms[entry] < files.Length)
+        {
+            int baseID = baseForms[entry];
+            var bPkm = PersonalTable.GetInfo(files[baseID], Main.Config.Version);
+            if (bPkm != null)
+            {
+                origValues[0] = bPkm.HP;
+                origValues[1] = bPkm.ATK;
+                origValues[2] = bPkm.DEF;
+                origValues[3] = bPkm.SPA;
+                origValues[4] = bPkm.SPD;
+                origValues[5] = bPkm.SPE;
+            }
+        }
+        else if (vanillaStats != null && entry < vanillaStats.Length && vanillaStats[entry] != null && vanillaStats[entry].Any(v => v > 0))
+        {
+            origValues = vanillaStats[entry];
+        }
+        else if (originalFiles != null && entry < originalFiles.Length && originalFiles[entry] != null && originalFiles[entry].Length >= 6)
+        {
+            var oPkm = PersonalTable.GetInfo(originalFiles[entry], Main.Config.Version);
+            if (oPkm != null)
+            {
+                origValues[0] = oPkm.HP;
+                origValues[1] = oPkm.ATK;
+                origValues[2] = oPkm.DEF;
+                origValues[3] = oPkm.SPA;
+                origValues[4] = oPkm.SPD;
+                origValues[5] = oPkm.SPE;
+            }
+        }
+        else
+        {
+            origValues[0] = pkm.HP;
+            origValues[1] = pkm.ATK;
+            origValues[2] = pkm.DEF;
+            origValues[3] = pkm.SPA;
+            origValues[4] = pkm.SPD;
+            origValues[5] = pkm.SPE;
+        }
+
+        SetDiffLabel(L_DiffHP, hp, origValues[0]);
+        SetDiffLabel(L_DiffATK, atk, origValues[1]);
+        SetDiffLabel(L_DiffDEF, def, origValues[2]);
+        SetDiffLabel(L_DiffSPA, spa, origValues[3]); 
+        SetDiffLabel(L_DiffSPD, spd, origValues[4]); 
+        SetDiffLabel(L_DiffSPE, spe, origValues[5]); 
+
+        int origBST = origValues.Sum();
+        int curBST = hp + atk + def + spa + spd + spe;
+        int diff = curBST - origBST;
+        
+        TB_BST.Text = curBST.ToString("000");
+
+        if (diff > 0)
+        {
+            L_StatDiff.Text = $"{prefix} BST Diff: {curBST} (+{diff} compared to {origBST})";
+            L_StatDiff.ForeColor = Color.FromArgb(40, 180, 80);
+        }
+        else if (diff < 0)
+        {
+            L_StatDiff.Text = $"{prefix} BST Diff: {curBST} ({diff} compared to {origBST})";
+            L_StatDiff.ForeColor = Color.FromArgb(230, 70, 70);
+        }
+        else
+        {
+            L_StatDiff.Text = $"{prefix} BST Diff: {curBST} (0 compared to {origBST})";
+            L_StatDiff.ForeColor = Color.Gray; 
+        }
+    }
+
+    private void SetDiffLabel(Label l, int current, int original)
+    {
+        if (l == null) return;
+        int diff = current - original;
+        if (diff > 0) { l.Text = $"+{diff}"; l.ForeColor = Color.FromArgb(40, 180, 80); }
+        else if (diff < 0) { l.Text = $"{diff}"; l.ForeColor = Color.FromArgb(230, 70, 70); }
+        else { l.Text = "0"; l.ForeColor = Color.Gray; } 
+    }
+
+    private void GenerateFullChangelog()
+    {
+        if (vanillaStats == null) { WinFormsUtil.Alert("Vanilla stats missing."); return; }
+        StringBuilder sb = new StringBuilder();
+        sb.AppendLine("=== COMPREHENSIVE CHANGELOG ===");
+        int changes = 0;
+        var pkmTypeNames = Main.Config.GetText(TextName.Types);
+        var abilityNames = Main.Config.GetText(TextName.AbilityNames);
+
+        for (int i = 1; i < files.Length; i++)
+        {
+            if (files[i] == null || files[i].Length != PersonalInfoSM.SIZE) continue;
+            var cur = new PersonalInfoSM(files[i]);
+            
+            int[] old = null;
+            if (i > Main.Config.MaxSpeciesID && baseForms != null && i < baseForms.Length)
+            {
+                int baseID = baseForms[i];
+                if (baseID < vanillaStats.Length && vanillaStats[baseID] != null) old = vanillaStats[baseID];
+            }
+            else if (i < vanillaStats.Length && vanillaStats[i] != null)
+            {
+                old = vanillaStats[i];
+            }
+            
+            if (old == null) continue;
+
+            List<string> specDiffs = new List<string>();
+            if (cur.HP != old[0]) specDiffs.Add($"HP changed: {old[0]} -> {cur.HP}");
+            if (cur.ATK != old[1]) specDiffs.Add($"ATK changed: {old[1]} -> {cur.ATK}");
+            if (cur.DEF != old[2]) specDiffs.Add($"DEF changed: {old[2]} -> {cur.DEF}");
+            if (cur.SPA != old[3]) specDiffs.Add($"SPA changed: {old[3]} -> {cur.SPA}");
+            if (cur.SPD != old[4]) specDiffs.Add($"SPD changed: {old[4]} -> {cur.SPD}");
+            if (cur.SPE != old[5]) specDiffs.Add($"SPE changed: {old[5]} -> {cur.SPE}");
+            
+            if (specDiffs.Count > 0)
+            {
+                string speciesName = (CB_Species.Items.Count > i) ? CB_Species.Items[i].ToString() : $"Entry {i}";
+                sb.AppendLine($"\n[{i:000} - {speciesName}]");
+                foreach (var d in specDiffs) sb.AppendLine($"  • {d}");
+                changes++;
+            }
+        }
+        sb.AppendLine($"\nTotal Modified Species: {changes}");
+        RTB_Changelog.Text = sb.ToString();
+    }
+
+    private void B_CopyPage1_Click(object sender, EventArgs e)
+    {
+        // -- General Info --
+        string[] page1Data = {
+            TB_BaseHP.Text, TB_BaseATK.Text, TB_BaseDEF.Text, TB_BaseSPA.Text, TB_BaseSPD.Text, TB_BaseSPE.Text,
+            CB_Type1.SelectedIndex.ToString(), CB_Type2.SelectedIndex.ToString(),
+            TB_CatchRate.Text, TB_HatchCycles.Text, TB_Friendship.Text, TB_Gender.Text,
+            LazyCombo.GetIndex(CB_Ability1).ToString(), LazyCombo.GetIndex(CB_Ability2).ToString(), LazyCombo.GetIndex(CB_Ability3).ToString(),
+            CB_EggGroup1.SelectedIndex.ToString(), CB_EggGroup2.SelectedIndex.ToString(),
+            TB_Height.Text, TB_Weight.Text, CB_Color.SelectedIndex.ToString(),
+            TB_BaseExp.Text, CB_EXPGroup.SelectedIndex.ToString(), TB_CallRate.Text,
+            TB_HPEVs.Text, TB_ATKEVs.Text, TB_DEFEVs.Text, TB_SPAEVs.Text, TB_SPDEVs.Text, TB_SPEEVs.Text,
+            LazyCombo.GetIndex(CB_HeldItem1).ToString(), LazyCombo.GetIndex(CB_HeldItem2).ToString(), LazyCombo.GetIndex(CB_HeldItem3).ToString()
+        };
+
+        // Also copy Move Tutor/TM data into in-memory clipboard
+        ClipboardTMs = new bool[CLB_TM.Items.Count];
+        for (int i = 0; i < CLB_TM.Items.Count; i++) ClipboardTMs[i] = CLB_TM.GetItemChecked(i);
+
+        ClipboardTutors = new bool[CLB_MoveTutors.Items.Count];
+        for (int i = 0; i < CLB_MoveTutors.Items.Count; i++) ClipboardTutors[i] = CLB_MoveTutors.GetItemChecked(i);
+
+        if (CLB_BeachTutors.Visible)
+        {
+            ClipboardBeachTutors = new bool[CLB_BeachTutors.Items.Count];
+            for (int i = 0; i < CLB_BeachTutors.Items.Count; i++) ClipboardBeachTutors[i] = CLB_BeachTutors.GetItemChecked(i);
+        }
+
+        Clipboard.SetText(string.Join(",", page1Data));
+        System.Media.SystemSounds.Asterisk.Play();
+    }
+
+    private void B_PastePage1_Click(object sender, EventArgs e)
+    {
+        if (!Clipboard.ContainsText()) return;
+        string[] p = Clipboard.GetText().Split(',');
+        
+        if (p.Length < 29) { WinFormsUtil.Error("Invalid clipboard data. Ensure you copied a full set."); return; }
+
+        TB_BaseHP.Text = p[0]; TB_BaseATK.Text = p[1]; TB_BaseDEF.Text = p[2]; 
+        TB_BaseSPA.Text = p[3]; TB_BaseSPD.Text = p[4]; TB_BaseSPE.Text = p[5];
+        CB_Type1.SelectedIndex = int.Parse(p[6]); CB_Type2.SelectedIndex = int.Parse(p[7]);
+        TB_CatchRate.Text = p[8]; TB_HatchCycles.Text = p[9]; TB_Friendship.Text = p[10]; TB_Gender.Text = p[11];
+        LazyCombo.SetIndex(CB_Ability1, int.Parse(p[12])); LazyCombo.SetIndex(CB_Ability2, int.Parse(p[13])); LazyCombo.SetIndex(CB_Ability3, int.Parse(p[14]));
+        CB_EggGroup1.SelectedIndex = int.Parse(p[15]); CB_EggGroup2.SelectedIndex = int.Parse(p[16]);
+        
+        TB_Height.Text = p[17]; 
+        TB_Weight.Text = p[18]; 
+        if (int.TryParse(p[19], out int colIdx) && colIdx > -1 && colIdx < CB_Color.Items.Count) CB_Color.SelectedIndex = colIdx;
+        TB_BaseExp.Text = p[20];
+        if (int.TryParse(p[21], out int expIdx) && expIdx > -1 && expIdx < CB_EXPGroup.Items.Count) CB_EXPGroup.SelectedIndex = expIdx;
+        TB_CallRate.Text = p[22];
+        
+        TB_HPEVs.Text = p[23]; TB_ATKEVs.Text = p[24]; TB_DEFEVs.Text = p[25];
+        TB_SPAEVs.Text = p[26]; TB_SPDEVs.Text = p[27]; TB_SPEEVs.Text = p[28];
+
+        if (p.Length >= 32)
+        {
+            LazyCombo.SetIndex(CB_HeldItem1, int.Parse(p[29]));
+            LazyCombo.SetIndex(CB_HeldItem2, int.Parse(p[30]));
+            LazyCombo.SetIndex(CB_HeldItem3, int.Parse(p[31]));
+        }
+
+        // Restore TM/Tutor selections if they were copied
+        if (ClipboardTMs != null)
+        {
+            for (int i = 0; i < Math.Min(CLB_TM.Items.Count, ClipboardTMs.Length); i++)
+                CLB_TM.SetItemChecked(i, ClipboardTMs[i]);
+        }
+        if (ClipboardTutors != null)
+            for (int i = 0; i < CLB_MoveTutors.Items.Count && i < ClipboardTutors.Length; i++)
+                CLB_MoveTutors.SetItemChecked(i, ClipboardTutors[i]);
+
+        if (ClipboardBeachTutors != null && CLB_BeachTutors.Visible)
+            for (int i = 0; i < CLB_BeachTutors.Items.Count && i < ClipboardBeachTutors.Length; i++)
+                CLB_BeachTutors.SetItemChecked(i, ClipboardBeachTutors[i]);
+
+        SaveEntry();
+        System.Media.SystemSounds.Asterisk.Play();
+    }
+    private void B_CopyTMs_Click(object sender, EventArgs e)
+    {
+        ClipboardTMs = new bool[CLB_TM.Items.Count];
+        for (int i = 0; i < CLB_TM.Items.Count; i++)
+            ClipboardTMs[i] = CLB_TM.GetItemChecked(i);
+        System.Media.SystemSounds.Asterisk.Play();
+    }
+    private void B_PasteTMs_Click(object sender, EventArgs e)
+    {
+        if (ClipboardTMs == null) return;
+        for (int i = 0; i < Math.Min(CLB_TM.Items.Count, ClipboardTMs.Length); i++)
+            CLB_TM.SetItemChecked(i, ClipboardTMs[i]);
+        SaveEntry();
+        System.Media.SystemSounds.Asterisk.Play();
+    }
+
+    private void B_ExportTM_Click(object sender, EventArgs e)
+    {
+        var sfd = new SaveFileDialog { FileName = "TM_Tutor_Dump", Filter = "CSV File|*.csv|Text File (Tab)|*.txt|TS File (Tab)|*.ts" };
+        if (sfd.ShowDialog() != DialogResult.OK) return;
+        try { ExportTMsTutors(sfd.FileName); }
+        catch (Exception ex) { WinFormsUtil.Error("Export Failed:", ex.Message); }
+    }
+
+    private void B_ImportTM_Click(object sender, EventArgs e)
+    {
+        var ofd = new OpenFileDialog { Filter = "Supported Formats|*.csv;*.txt;*.ts|CSV File|*.csv|Text File|*.txt|TS File|*.ts" };
+        if (ofd.ShowDialog() != DialogResult.OK) return;
+        try { ImportTMsTutors(ofd.FileName); }
+        catch (Exception ex) { WinFormsUtil.Error("Import Failed:", ex.Message); }
+    }
+
+    private void B_CopyTutors_Click(object sender, EventArgs e)
+    {
+        ClipboardTutors = new bool[CLB_MoveTutors.Items.Count];
+        for (int i = 0; i < CLB_MoveTutors.Items.Count; i++)
+            ClipboardTutors[i] = CLB_MoveTutors.GetItemChecked(i);
+
+        ClipboardBeachTutors = new bool[CLB_BeachTutors.Items.Count];
+        for (int i = 0; i < CLB_BeachTutors.Items.Count; i++)
+            ClipboardBeachTutors[i] = CLB_BeachTutors.GetItemChecked(i);
+
+        System.Media.SystemSounds.Asterisk.Play();
+    }
+
+    private void B_PasteTutors_Click(object sender, EventArgs e)
+    {
+        if (ClipboardTutors != null)
+        {
+            for (int i = 0; i < Math.Min(CLB_MoveTutors.Items.Count, ClipboardTutors.Length); i++)
+                CLB_MoveTutors.SetItemChecked(i, ClipboardTutors[i]);
+        }
+        if (ClipboardBeachTutors != null)
+        {
+            for (int i = 0; i < Math.Min(CLB_BeachTutors.Items.Count, ClipboardBeachTutors.Length); i++)
+                CLB_BeachTutors.SetItemChecked(i, ClipboardBeachTutors[i]);
+        }
+        SaveEntry();
+        System.Media.SystemSounds.Asterisk.Play();
+    }
+
+    private void B_MaxCatch_Click(object sender, EventArgs e)
+    {
+        if (entry < 1 || entry >= files.Length || pkm == null) return;
+        TB_CatchRate.Text = "255";
+        pkm.CatchRate = 255;
+        SaveEntry();
+    }
+
+    private void B_ZeroHatch_Click(object sender, EventArgs e)
+    {
+        if (entry < 1 || entry >= files.Length || pkm == null) return;
+        TB_HatchCycles.Text = "000";
+        pkm.HatchCycles = 0;
+        SaveEntry();
+    }
+
+    private void B_MaxCatchAll_Click(object sender, EventArgs e)
+    {
+        if (WinFormsUtil.Prompt(MessageBoxButtons.YesNo, "Apply Max Catch Rate (255) to ALL Pokémon?") != DialogResult.Yes) return;
+        int entryLen = files.FirstOrDefault(f => f != null && f.Length < 0x1000)?.Length ?? 84;
+        for (int i = 1; i < files.Length; i++)
+        {
+            if (files[i] == null || files[i].Length != entryLen)
+                continue;
+
+            PersonalInfo pi = null;
+            if (Main.SpeciesStat != null && i < Main.SpeciesStat.Length && Main.SpeciesStat[i] != null)
+                pi = Main.SpeciesStat[i];
+            else
+                pi = PersonalTable.GetInfo(files[i], Main.Config.Version);
+
+            if (pi != null)
+            {
+                pi.CatchRate = 255;
+                files[i] = pi.Write();
+                if (Main.SpeciesStat != null && i < Main.SpeciesStat.Length)
+                    Main.SpeciesStat[i] = pi;
+            }
+        }
+        if (entry >= 1 && entry < files.Length && pkm != null)
+        {
+            pkm.CatchRate = 255;
+            TB_CatchRate.Text = "255";
+            SaveEntry();
+        }
+        WinFormsUtil.Alert("All Pokémon Catch Rates set to 255.");
+    }
+
+    private void B_ZeroHatchAll_Click(object sender, EventArgs e)
+    {
+        if (WinFormsUtil.Prompt(MessageBoxButtons.YesNo, "Apply 0 Hatch Cycles to ALL Pokémon?") != DialogResult.Yes) return;
+        int entryLen = files.FirstOrDefault(f => f != null && f.Length < 0x1000)?.Length ?? 84;
+        for (int i = 1; i < files.Length; i++)
+        {
+            if (files[i] == null || files[i].Length != entryLen)
+                continue;
+
+            PersonalInfo pi = null;
+            if (Main.SpeciesStat != null && i < Main.SpeciesStat.Length && Main.SpeciesStat[i] != null)
+                pi = Main.SpeciesStat[i];
+            else
+                pi = PersonalTable.GetInfo(files[i], Main.Config.Version);
+
+            if (pi != null)
+            {
+                pi.HatchCycles = 0;
+                files[i] = pi.Write();
+                if (Main.SpeciesStat != null && i < Main.SpeciesStat.Length)
+                    Main.SpeciesStat[i] = pi;
+            }
+        }
+        if (entry >= 1 && entry < files.Length && pkm != null)
+        {
+            pkm.HatchCycles = 0;
+            TB_HatchCycles.Text = "000";
+            SaveEntry();
+        }
+        WinFormsUtil.Alert("All Pokémon Hatch Cycles set to 0.");
+    }
+
+    private void B_JumpEggMoves_Click(object sender, EventArgs e)
+    {
+        if (eggmoves == null) return;
+        SaveEntry();
+        var editor = new EggMoveEditor7(eggmoves) { StartSpecies = entry };
+        editor.ShowDialog();
+        ReadEntry();
+    }
+    private void LoadVanillaStats() 
+    {
+        if (files == null || files.Length == 0) return; // Safety check
+
+        vanillaStats = new int[files.Length][];
+        string[] candidatePaths =
+        [
+            Path.Combine(Application.StartupPath, "vanilla_stats.txt"),
+            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "vanilla_stats.txt"),
+            Path.Combine(Directory.GetCurrentDirectory(), "vanilla_stats.txt")
+        ];
+
+        string path = candidatePaths.FirstOrDefault(File.Exists);
+
+        if (path != null)
+        {
+            try
+            {
+                string[] lines = File.ReadAllLines(path);
+                for (int i = 0; i < lines.Length && i < files.Length; i++)
+                {
+                    string[] parts = lines[i].Split(',');
+                    if (parts.Length == 6)
+                    {
+                        vanillaStats[i] = new int[6];
+                        for (int j = 0; j < 6; j++)
+                            int.TryParse(parts[j].Trim(), out vanillaStats[i][j]);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error reading vanilla_stats.txt: {ex.Message}");
+            }
+        }
+        else
+        {
+            try
+            {
+                string targetPath = candidatePaths[0];
+                List<string> lines = new List<string>();
+                for (int i = 0; i < files.Length; i++)
+                {
+                    vanillaStats[i] = new int[6];
+                    if (i > 0 && files[i] != null && files[i].Length > 0)
+                    {
+                        var info = PersonalTable.GetInfo(files[i], Main.Config.Version);
+                        if (info != null)
+                        {
+                            vanillaStats[i][0] = info.HP;
+                            vanillaStats[i][1] = info.ATK;
+                            vanillaStats[i][2] = info.DEF;
+                            vanillaStats[i][3] = info.SPA;
+                            vanillaStats[i][4] = info.SPD;
+                            vanillaStats[i][5] = info.SPE;
+                        }
+                    }
+                    lines.Add($"{vanillaStats[i][0]},{vanillaStats[i][1]},{vanillaStats[i][2]},{vanillaStats[i][3]},{vanillaStats[i][4]},{vanillaStats[i][5]}");
+                }
+                File.WriteAllLines(targetPath, lines);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error creating vanilla_stats.txt: {ex.Message}");
+            }
+        }
+    }
+    private void Form_Closing(object sender, FormClosingEventArgs e)
+    {
+        if (entry > -1) SaveEntry();
+        RandSettings.SetFormSettings(this, TP_Randomizer.Controls);
+    }
+
+
+
+}

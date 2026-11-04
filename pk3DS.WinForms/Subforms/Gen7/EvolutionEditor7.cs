@@ -1,0 +1,446 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Media;
+using System.Text;
+using System.Windows.Forms;
+
+using pk3DS.Core;
+using pk3DS.Core.Randomizers;
+using pk3DS.Core.Structures;
+
+namespace pk3DS.WinForms;
+
+public partial class EvolutionEditor7 : Form
+{
+    public EvolutionEditor7(byte[][] infiles)
+    {
+        files = infiles;
+        originalFiles = infiles.Select(a => (byte[])a.Clone()).ToArray();
+        InitializeComponent();
+
+        specieslist[0] = movelist[0] = itemlist[0] = "";
+        string[][] AltForms = Main.Config.Personal.GetFormList(specieslist, Main.Config.MaxSpeciesID);
+        specieslist = Main.Config.Personal.GetPersonalEntryList(AltForms, specieslist, Main.Config.MaxSpeciesID, out baseForms, out formVal);
+        for (int i = 0; i < specieslist.Length; i++) specieslist[i] ??= "";
+
+        string GetSpec(int id) => (id >= 0 && id < specieslist.Length && !string.IsNullOrEmpty(specieslist[id])) ? specieslist[id] : $"Species {id}";
+        string GetType(int id) => (typelist != null && id >= 0 && id < typelist.Length && !string.IsNullOrEmpty(typelist[id])) ? typelist[id] : $"Type {id}";
+
+        string[] evolutionMethods =
+        [
+            "",
+            "Level Up with Friendship",
+            "Level Up at Morning with Friendship",
+            "Level Up at Night with Friendship",
+            "Level Up",
+            "Trade",
+            "Trade with Held Item",
+            $"Trade for opposite {GetSpec(588)}/{GetSpec(616)}", // Shelmet&Karrablast
+            "Used Item",
+            "Level Up (Attack > Defense)",
+            "Level Up (Attack = Defense)",
+            "Level Up (Attack < Defense)",
+            "Level Up (Random < 5)",
+            "Level Up (Random > 5)",
+            $"Level Up ({GetSpec(291)})", // Ninjask
+            $"Level Up ({GetSpec(292)})", // Shedinja
+            "Level Up (Beauty)",
+            "Used Item (Male)", // Kirlia->Gallade
+            "Used Item (Female)", // Snorunt->Froslass
+            "Level Up with Held Item (Day)",
+            "Level Up with Held Item (Night)",
+            "Level Up with Move",
+            "Level Up with Party",
+            "Level Up Male",
+            "Level Up Female",
+            "Level Up at Electric",
+            "Level Up at Forest",
+            "Level Up at Cold",
+            "Level Up with 3DS Upside Down",
+            "Level Up with 50 Affection + MoveType",
+            $"{GetType(16)} Type in Party",
+            "Overworld Rain",
+            "Level Up (@) at Morning",
+            "Level Up (@) at Night",
+            "Level Up Female (SetForm 1)",
+            "UNUSED",
+            "Level Up Any Time on Version",
+            "Level Up Daytime on Version",
+            "Level Up Nighttime on Version",
+            "Level Up Summit",
+        ];
+
+        var evos = new List<string>(evolutionMethods);
+        if (Main.Config.USUM)
+        {
+            evos.AddRange([
+                "Level Up (@) Dusk", // 40
+                "Level Up (Wormhole)", // 41
+                "Used Item (Wormhole)", // 42
+            ]);
+        }
+
+        mb = [CB_M1, CB_M2, CB_M3, CB_M4, CB_M5, CB_M6, CB_M7, CB_M8];
+        pb = [CB_P1, CB_P2, CB_P3, CB_P4, CB_P5, CB_P6, CB_P7, CB_P8];
+        rb = [CB_I1, CB_I2, CB_I3, CB_I4, CB_I5, CB_I6, CB_I7, CB_I8];
+        fb = [NUD_F1, NUD_F2, NUD_F3, NUD_F4, NUD_F5, NUD_F6, NUD_F7, NUD_F8];
+        lb = [NUD_L1, NUD_L2, NUD_L3, NUD_L4, NUD_L5, NUD_L6, NUD_L7, NUD_L8];
+        pic = [PB_1, PB_2, PB_3, PB_4, PB_5, PB_6, PB_7, PB_8];
+
+        maxEvoMethod = evos.Count;
+        foreach (ComboBox cb in mb)
+        {
+            cb.Items.Clear();
+            cb.Items.AddRange(evos.Select(e => e ?? "").ToArray());
+        }
+
+        foreach (ComboBox cb in rb)
+        {
+            cb.Items.Clear();
+            cb.Items.AddRange(specieslist.Select(s => s ?? "").ToArray());
+        }
+
+        CB_Species.Items.Clear();
+        CB_Species.Items.AddRange(specieslist.Select(s => s ?? "").ToArray());
+
+        CB_Species.SelectedIndex = 1;
+        RTB_Changelog.ReadOnly = true;
+        LogChange("Evolution Editor initialized.");
+        RandSettings.GetFormSettings(this, GB_Randomizer.Controls);
+    }
+
+    private readonly byte[][] files;
+    private readonly ComboBox[] pb, mb, rb;
+    private readonly NumericUpDown[] fb, lb;
+    private readonly PictureBox[] pic;
+    private int entry = -1;
+    private readonly byte[][] originalFiles;
+    private readonly string[] specieslist = Main.Config.GetText(TextName.SpeciesNames);
+    private readonly string[] movelist = Main.Config.GetText(TextName.MoveNames);
+    private readonly string[] itemlist = Main.Config.GetText(TextName.ItemNames);
+    private readonly string[] typelist = Main.Config.GetText(TextName.Types);
+    private bool dumping, loading;
+    private readonly int[] baseForms, formVal;
+    private EvolutionSet7 evo = new(new byte[EvolutionSet7.SIZE]);
+    private readonly int maxEvoMethod;
+
+    private void GetList()
+    {
+        // Use SelectedIndex when it matches the visible text (explicit dropdown selection or form entry).
+        // Fall back to name search when the user typed a species name without selecting from the dropdown,
+        // in which case SelectedIndex still points to the previously selected entry.
+        int idx = CB_Species.SelectedIndex;
+        if (idx < 0 || idx >= specieslist.Length || specieslist[idx] != CB_Species.Text)
+            idx = Array.IndexOf(specieslist, CB_Species.Text);
+        entry = idx;
+        if (entry < 0 || entry >= files.Length) return;
+        byte[] input = files[entry];
+        if (input.Length != EvolutionSet7.SIZE) return; // error
+        evo = new EvolutionSet7(input);
+
+        for (int i = 0; i < evo.PossibleEvolutions.Length; i++)
+        {
+            if (evo.PossibleEvolutions[i].Method > maxEvoMethod)
+                return; // Invalid!
+
+            loading = true;
+            fb[i].Value = evo.PossibleEvolutions[i].Form;
+            lb[i].Value = evo.PossibleEvolutions[i].Level;
+
+            int m = evo.PossibleEvolutions[i].Method;
+            int a = evo.PossibleEvolutions[i].Argument;
+            int s = evo.PossibleEvolutions[i].Species;
+
+            mb[i].SelectedIndex = (m >= 0 && m < mb[i].Items.Count) ? m : 0;
+            pb[i].SelectedIndex = (a >= 0 && a < pb[i].Items.Count) ? a : 0;
+            rb[i].SelectedIndex = (s >= 0 && s < rb[i].Items.Count) ? s : 0;
+
+            loading = false;
+            ChangeInto(rb[i], null); // refresh sprite
+        }
+    }
+
+    private void SetList()
+    {
+        if (entry < 1 || dumping) return;
+
+        for (int i = 0; i < 8; i++)
+        {
+            evo.PossibleEvolutions[i].Species = rb[i].SelectedIndex;
+            evo.PossibleEvolutions[i].Method = mb[i].SelectedIndex;
+            evo.PossibleEvolutions[i].Argument = pb[i].SelectedIndex;
+            evo.PossibleEvolutions[i].Form = (sbyte)fb[i].Value;
+            evo.PossibleEvolutions[i].Level = (int)lb[i].Value;
+        }
+        files[entry] = evo.Write();
+        UpdateChangelog();
+        LogChange($"Saved evolutions for {CB_Species.Text}");
+    }
+
+    private void UpdateChangelog()
+    {
+        if (loading || dumping) return;
+        RTB_Changelog.Clear();
+        int count = 0;
+        for (int i = 0; i < files.Length; i++)
+        {
+            if (files[i].SequenceEqual(originalFiles[i])) continue;
+
+            var oldEvo = new EvolutionSet7(originalFiles[i]);
+            var newEvo = new EvolutionSet7(files[i]);
+            StringBuilder diff = new StringBuilder();
+
+            for (int j = 0; j < 8; j++)
+            {
+                var o = oldEvo.PossibleEvolutions[j];
+                var n = newEvo.PossibleEvolutions[j];
+                if (o.Species == n.Species && o.Method == n.Method && o.Argument == n.Argument && o.Form == n.Form && o.Level == n.Level)
+                    continue;
+
+                string os = o.Species == 0 ? "None" : specieslist[o.Species];
+                string ns = n.Species == 0 ? "None" : specieslist[n.Species];
+                diff.AppendLine($"  Slot {j + 1}: {os} -> {ns} (M: {o.Method}->{n.Method}, P: {o.Argument}->{n.Argument})");
+            }
+
+            if (diff.Length > 0)
+            {
+                RTB_Changelog.AppendText($"{specieslist[i]}:{Environment.NewLine}{diff}");
+                count++;
+            }
+        }
+    }
+
+    private void LogChange(string text)
+    {
+        if (RTB_Changelog == null) return;
+        RTB_Changelog.AppendText($"[{DateTime.Now:HH:mm:ss}] {text}{Environment.NewLine}");
+    }
+
+    private void B_GenerateChangelog_Click(object sender, EventArgs e) => UpdateChangelog();
+
+    private void ChangeEntry(object sender, EventArgs e)
+    {
+        SetList();
+        GetList();
+    }
+
+    private void B_RandAll_Click(object sender, EventArgs e)
+    {
+        if (DialogResult.Yes != WinFormsUtil.Prompt(MessageBoxButtons.YesNo, "Randomize all resulting species?", "Evolution methods and parameters will stay the same."))
+            return;
+
+        SetList();
+        // Set up advanced randomization options
+        var evos = files.Select(z => new EvolutionSet7(z)).ToArray();
+        var evoRand = new EvolutionRandomizer(Main.Config, evos)
+        {
+            Randomizer =
+            {
+                rBST = CHK_BST.Checked,
+                rEXP = CHK_Exp.Checked,
+                rType = CHK_Type.Checked,
+                L = CHK_L.Checked,
+                E = CHK_E.Checked,
+            },
+        };
+        evoRand.Randomizer.Initialize();
+        evoRand.Execute();
+        evos.Select(z => z.Write()).ToArray().CopyTo(files, 0);
+        GetList();
+
+        WinFormsUtil.Alert("All Pokémon's Evolutions have been randomized!");
+    }
+
+    private void B_AddMissingEvos_Click(object sender, EventArgs e)
+    {
+        SetList();
+        var evos = files.Select(z => new EvolutionSet7(z)).ToArray();
+
+        if (Main.Config.MaxSpeciesID < 1025)
+        {
+            WinFormsUtil.Alert("This ROM does not have the Expansion Pack species.",
+                "These evolution methods only apply to species 808-1025, which are not present here.");
+            return;
+        }
+
+        int missing = ExpansionPackEvolutions.CountMissing(Main.Config, evos);
+        if (missing == 0)
+        {
+            WinFormsUtil.Alert("Nothing to add.",
+                $"All {ExpansionPackEvolutions.DefinedCount} Expansion Pack evolution methods are already present.");
+            return;
+        }
+
+        if (DialogResult.Yes != WinFormsUtil.Prompt(MessageBoxButtons.YesNo,
+                $"Add {missing} missing evolution method(s)?",
+                "Covers Primeape, Girafarig, Dunsparce, Stantler, Meltan, Toxel and the rest of the "
+                + "Expansion Pack species, plus the Galarian, Hisuian and White-Striped forms.\n\n"
+                + "Existing evolutions are left alone - these only fill empty slots."))
+            return;
+
+        int added = ExpansionPackEvolutions.Apply(Main.Config, evos);
+        evos.Select(z => z.Write()).ToArray().CopyTo(files, 0);
+        GetList();
+
+        WinFormsUtil.Alert($"Added {added} evolution method(s).",
+            added < missing
+                ? $"{missing - added} could not be added - either the species has no free evolution "
+                  + "slot, or a move/item the method needs is not in this ROM."
+                : "Save the editor to write them to the ROM.");
+    }
+
+    private void B_Trade_Click(object sender, EventArgs e)
+    {
+        if (DialogResult.Yes != WinFormsUtil.Prompt(MessageBoxButtons.YesNo, "Remove all trade evolutions?", "Evolution methods will be altered so that evolutions will be possible with only one game."))
+            return;
+
+        SetList();
+        var evos = files.Select(z => new EvolutionSet7(z)).ToArray();
+        var evoRand = new EvolutionRandomizer(Main.Config, evos);
+        evoRand.Randomizer.Initialize();
+        evoRand.ExecuteTrade();
+        evos.Select(z => z.Write()).ToArray().CopyTo(files, 0);
+        GetList();
+
+        WinFormsUtil.Alert("All trade evolutions have been removed!", "Trade evolutions will now occur after reaching a certain Level, or after leveling up while holding its appropriate trade item.");
+    }
+
+    private void B_EveryLevel_Click(object sender, EventArgs e)
+    {
+        if (DialogResult.Yes != WinFormsUtil.Prompt(MessageBoxButtons.YesNo, "Modify evolutions?", "This will make it to where your Pokémon will evolve into something random every time it levels up."))
+            return;
+
+        SetList();
+        var evos = files.Select(z => new EvolutionSet7(z)).ToArray();
+        var evoRand = new EvolutionRandomizer(Main.Config, evos)
+        {
+            Randomizer =
+            {
+                rBST = CHK_BST.Checked,
+                rEXP = CHK_Exp.Checked,
+                rType = CHK_Type.Checked,
+                L = CHK_L.Checked,
+                E = CHK_E.Checked,
+            },
+        };
+        evoRand.Randomizer.Initialize();
+        evoRand.ExecuteEvolveEveryLevel();
+        evoRand.Execute(); // randomize right after
+        evos.Select(z => z.Write()).ToArray().CopyTo(files, 0);
+        GetList();
+        SystemSounds.Asterisk.Play();
+    }
+
+    private void B_Dump_Click(object sender, EventArgs e)
+    {
+        if (DialogResult.Yes != WinFormsUtil.Prompt(MessageBoxButtons.YesNo, "Dump all Evolutions to Text File?"))
+            return;
+
+        dumping = true;
+        string result = "";
+        for (int i = 0; i < Math.Min(CB_Species.Items.Count, files.Length); i++)
+        {
+            CB_Species.SelectedIndex = i; // Get new Species (use index so alt forms select correctly)
+            result += "======" + Environment.NewLine + entry + " " + CB_Species.Text + Environment.NewLine + "======" + Environment.NewLine;
+            for (int j = 0; j < 8; j++)
+            {
+                int methodval = mb[j].SelectedIndex;
+                // int param = pb[j].SelectedIndex;
+                int poke = rb[j].SelectedIndex;
+                if (poke > 0 && methodval > 0)
+                {
+                    string species = rb[j].Text;
+                    int bf = formVal[entry];
+                    string param = pb[j].Visible ? " [" + pb[j].Text + "]" : "";
+                    if (lb[j].Value > 0)
+                        param += $"@ level {lb[j].Value}";
+                    string method = mb[j].Text;
+                    int f = fb[j].Value == -1 ? bf : (int)fb[j].Value;
+                    string form = f == 0 ? "" : "-" + f;
+
+                    result += $"{method} {param} into {species}{form}".Replace("  ", " ") + Environment.NewLine;
+                }
+            }
+
+            result += Environment.NewLine;
+        }
+        var sfd = new SaveFileDialog { FileName = "Evolutions.txt", Filter = "Text File|*.txt" };
+
+        SystemSounds.Asterisk.Play();
+        if (sfd.ShowDialog() == DialogResult.OK)
+        {
+            string path = sfd.FileName;
+            File.WriteAllText(path, result, Encoding.Unicode);
+        }
+        dumping = false;
+    }
+
+    private void Form_Closing(object sender, FormClosingEventArgs e)
+    {
+        SetList();
+        RandSettings.SetFormSettings(this, GB_Randomizer.Controls);
+    }
+
+    private void ChangeMethod(object sender, EventArgs e)
+    {
+        int op = Array.IndexOf(mb, sender as ComboBox);
+        ushort[] methodCase =
+        [
+            0,0,0,0,1,0,2,0,2,1,1,1,1,1,1,1,5,2,2,2,2,3,4,1,1,0,0,0, // 27, Past Methods
+            // New Methods
+            1, // 28 - Dark Type Party
+            6, // 29 - Affection + MoveType
+            1, // 30 - UpsideDown 3DS
+            1, // 31 - Overworld Rain
+            1, // 32 - Level @ Day
+            1, // 33 - Level @ Night
+            1, // 34 - Gender Branch
+            1, // 35 - UNUSED
+            7, 7, 7, // Version Specific
+            1,
+            1, // 40 - Level Up with Condition (???)
+            1, // 41 - Level Up with Condition (???)
+            2, // 42 - Use Item with Condition (???)
+        ];
+
+        pb[op].Visible = pic[op].Visible = rb[op].Visible = fb[op].Visible = lb[op].Visible = mb[op].SelectedIndex > 0;
+
+        pb[op].Items.Clear();
+        int cv = methodCase[mb[op].SelectedIndex];
+        switch (cv)
+        {
+            case 0: // No Parameter Required
+            { pb[op].Visible = false; pb[op].Items.Add(""); break; }
+            case 1: // Level
+            { pb[op].Visible = false; pb[op].Items.Add(""); break; }
+            case 2: // Items
+            { pb[op].Items.AddRange(itemlist); break; }
+            case 3: // Moves
+            { pb[op].Items.AddRange(movelist); break; }
+            case 4: // Species
+            { pb[op].Items.AddRange(specieslist); break; }
+            case 5: // 0-255 (Beauty)
+            { for (int i = 0; i <= 255; i++) pb[op].Items.Add(i.ToString()); break; }
+            case 6:
+            { pb[op].Items.AddRange(typelist); break; }
+            case 7: // Version
+            { for (int i = 0; i <= 255; i++) pb[op].Items.Add(i.ToString()); break; }
+        }
+        pb[op].SelectedIndex = 0;
+    }
+
+    private void ChangeInto(object sender, EventArgs e)
+    {
+        if (loading || dumping)
+            return;
+        int index = sender is ComboBox ? Array.IndexOf(rb, sender) : Array.IndexOf(fb, sender);
+        int species = Array.IndexOf(specieslist, rb[index].Text);
+        int form = (int)fb[index].Value;
+        if (form == -1)
+            form = formVal[entry];
+
+        WinFormsUtil.SetImage(pic[index], WinFormsUtil.GetSprite(species, form, 0, 0, Main.Config));
+    }
+}

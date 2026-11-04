@@ -1,0 +1,27 @@
+name: Build pk3DS
+
+on:
+  push:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Build Solution
+      run: dotnet build pk3DS.sln -c Release
+
+    - name: Upload Compiled pk3DS
+      uses: actions/upload-artifact@v4
+      with:
+        name: pk3DS-Release
+        path: pk3DS.WinForms/bin/Release/net8.0-windows/

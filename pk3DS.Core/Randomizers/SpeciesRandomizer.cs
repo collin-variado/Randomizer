@@ -1,0 +1,366 @@
+using System.Collections.Generic;
+using System.Linq;
+
+using pk3DS.Core.Structures.PersonalInfo;
+
+namespace pk3DS.Core.Randomizers;
+
+public class SpeciesRandomizer
+{
+    //private readonly GameConfig Game;
+    private readonly PersonalInfo[] SpeciesStat;
+    private readonly int MaxSpeciesID;
+
+    public SpeciesRandomizer(GameConfig config)
+    {
+        var Game = config;
+        MaxSpeciesID = Game?.Info?.MaxSpeciesID ?? Game?.MaxSpeciesID ?? 807;
+        SpeciesStat = Game?.Personal?.Table ?? new PersonalInfo[MaxSpeciesID + 1];
+    }
+
+    public int[] AllowedSpecies { get; private set; } = [];
+
+    public void Initialize()
+    {
+        AllowedSpecies = InitializeSpeciesList();
+        RandSpec = new GenericRandomizer(AllowedSpecies);
+    }
+
+    public Dictionary<int, int> GlobalSpeciesMap { get; private set; } = new();
+
+    public void GenerateGlobalMapping(Structures.EvolutionSet[] evos = null)
+    {
+        GlobalSpeciesMap.Clear();
+        for (int i = 1; i <= MaxSpeciesID; i++)
+        {
+            if (!GlobalSpeciesMap.ContainsKey(i))
+            {
+                int mapped = GetRandomSpecies(i);
+                GlobalSpeciesMap[i] = mapped;
+            }
+        }
+
+        if (evos != null)
+        {
+            var handled = new HashSet<int>();
+            for (int i = 1; i <= MaxSpeciesID && i < evos.Length; i++)
+            {
+                PropagateMap(i);
+            }
+
+            void PropagateMap(int parent)
+            {
+                if (handled.Contains(parent)) return;
+                handled.Add(parent);
+
+                var evoList = evos[parent];
+                foreach (var evo in evoList.PossibleEvolutions.Where(e => e.Species != 0))
+                {
+                    int childSpec = evo.Species;
+                    if (childSpec <= MaxSpeciesID && !handled.Contains(childSpec))
+                    {
+                        int parentMapped = GlobalSpeciesMap.GetValueOrDefault(parent, parent);
+                        int childMapped = GetEvolutionSpeciesOrRandom(parentMapped, childSpec, evos);
+                        GlobalSpeciesMap[childSpec] = childMapped;
+                        PropagateMap(childSpec);
+                    }
+                }
+            }
+        }
+    }
+
+    private int GetEvolutionSpeciesOrRandom(int parentMapped, int originalChild, Structures.EvolutionSet[] evos)
+    {
+        if (parentMapped < evos.Length)
+        {
+            var parentEvoList = evos[parentMapped];
+            var evo = parentEvoList.PossibleEvolutions.FirstOrDefault(e => e.Species != 0);
+            if (evo != null)
+                return evo.Species;
+        }
+        return GetRandomSpecies(originalChild);
+    }
+
+    public int GetMappedSpecies(int oldSpecies)
+    {
+        if (GlobalSpeciesMap.TryGetValue(oldSpecies, out int mapped))
+            return mapped;
+        return GetRandomSpecies(oldSpecies);
+    }
+
+    #region Randomizer Settings
+    public bool G1 = true;
+    public bool G2 = true;
+    public bool G3 = true;
+    public bool G4 = true;
+    public bool G5 = true;
+    public bool G6 = true;
+    public bool G7 = false;
+    public bool G8 = true;
+    public bool G9 = true;
+    public bool L = false;
+    public bool E = false;
+    public bool Shedinja = false;
+    public bool rEXP = false;
+    public bool rBST = true;
+    public bool rType = false;
+    #endregion
+
+    #region Random Species Filtering Parameters
+    private GenericRandomizer RandSpec;
+    private int loopctr;
+    private const int l = 10; // tweakable scalars
+    private const int h = 11;
+    #endregion
+
+    internal int GetRandomSpecies(int oldSpecies, int bannedSpecies)
+    {
+        // Get a new random species
+        PersonalInfo oldpkm = SpeciesStat[oldSpecies];
+
+        loopctr = 0; // altering calculations to prevent infinite loops
+        int newSpecies;
+        while (!GetNewSpecies(bannedSpecies, oldpkm, out newSpecies))
+            loopctr++;
+        return newSpecies;
+    }
+
+    public int GetEvenDistributionSpecies() => RandSpec.Next();
+
+    public int GetRandomSpeciesType(int oldSpecies, int type)
+    {
+        // Get a new random species
+        PersonalInfo oldpkm = SpeciesStat[oldSpecies];
+
+        loopctr = 0; // altering calculations to prevent infinite loops
+        int newSpecies;
+        while (!GetNewSpecies(oldSpecies, oldpkm, out newSpecies) || !GetIsTypeMatch(newSpecies, type))
+            loopctr++;
+        return newSpecies;
+    }
+
+    private bool GetIsTypeMatch(int newSpecies, int type) => type == -1 || SpeciesStat[newSpecies].Types.Any(z => z == type) || loopctr > 9000;
+
+    public int GetRandomSpecies(int oldSpecies)
+    {
+        // Get a new random species
+        PersonalInfo oldpkm = SpeciesStat[oldSpecies];
+
+        loopctr = 0; // altering calculations to prevent infinite loops
+        int newSpecies;
+        while (!GetNewSpecies(oldSpecies, oldpkm, out newSpecies))
+        {
+            if (loopctr > 0x0001_0000)
+            {
+                PersonalInfo pkm = SpeciesStat[newSpecies];
+                if (IsSpeciesBSTBad(oldpkm, pkm) && loopctr > 0x0001_1000) // keep trying for at minimum BST
+                    continue;
+                return newSpecies; // failed to find any match based on criteria, return random species that may or may not match criteria
+            }
+            loopctr++;
+        }
+        return newSpecies;
+    }
+
+    private bool IsSpeciesReplacementBad(int newSpecies, int currentSpecies)
+    {
+        return newSpecies == currentSpecies && loopctr < MaxSpeciesID * 10;
+    }
+
+    private bool IsSpeciesEXPRateBad(PersonalInfo oldpkm, PersonalInfo pkm)
+    {
+        if (!rEXP)
+            return false;
+        // Experience Growth Rate matches; give up after as many tries as the A->A rule does, so a
+        // pool with no matching rate (Gen 1 only, Nincada's Erratic) cannot loop forever.
+        return oldpkm.EXPGrowth != pkm.EXPGrowth && loopctr < MaxSpeciesID * 10;
+    }
+
+    private bool IsSpeciesTypeBad(PersonalInfo oldpkm, PersonalInfo pkm)
+    {
+        if (!rType)
+            return false;
+        // Type has to be somewhat similar, until the pool has clearly run out of matches
+        // (Gen 1 only has no Dark type for Umbreon's slot).
+        return !oldpkm.Types.Any(z => pkm.Types.Contains(z)) && loopctr < MaxSpeciesID * 10;
+    }
+
+    private bool IsSpeciesBSTBad(PersonalInfo oldpkm, PersonalInfo pkm)
+    {
+        if (!rBST)
+            return false;
+        // Base stat total has to be close to original BST
+        int expand = loopctr / MaxSpeciesID;
+        if ((L || E) && loopctr > 10)
+        {
+            expand += (loopctr / 5) + 10;
+        }
+        int lo = oldpkm.BST * l / (h + expand);
+        int hi = oldpkm.BST * (h + expand) / l;
+        return lo > pkm.BST || pkm.BST > hi;
+    }
+
+    private int[] InitializeSpeciesList()
+    {
+        var list = new List<int>();
+        if (G1) AddGen1Species(list);
+        if (G2) AddGen2Species(list);
+        if (G3) AddGen3Species(list);
+        if (G4) AddGen4Species(list);
+        if (G5) AddGen5Species(list);
+        if (G6) AddGen6Species(list);
+        if (G7) AddGen7Species(list);
+        if (G8) AddGen8Species(list);
+        if (G9) AddGen9Species(list);
+
+        return list.Count == 0 ? RandomSpeciesList : [.. list];
+    }
+
+    private void AddGen1Species(List<int> list)
+    {
+        list.AddRange(Enumerable.Range(1, 143)); // Bulbasaur - Snorlax
+        list.AddRange(Enumerable.Range(147, 3)); // Dratini - Dragonite
+
+        if (L)
+        {
+            list.AddRange(Enumerable.Range(144, 3)); // Birds
+            list.Add(150); // Mewtwo
+        }
+        if (E) list.Add(151); // Mew
+    }
+
+    private void AddGen2Species(List<int> list)
+    {
+        list.AddRange(Enumerable.Range(152, 91)); // Chikorita - Blissey
+        list.AddRange(Enumerable.Range(246, 3)); // Larvitar - Tyranitar
+
+        if (L)
+        {
+            list.AddRange(Enumerable.Range(243, 3)); // Raikou, Entei, Suicune
+            list.AddRange(Enumerable.Range(249, 2)); // Lugia & Ho-Oh
+        }
+        if (E) list.Add(251); // Celebi
+    }
+
+    private void AddGen3Species(List<int> list)
+    {
+        list.AddRange(Enumerable.Range(252, 40)); // Treecko - Ninjask
+        list.AddRange(Enumerable.Range(293, 84)); // Whismur - Metagross
+        if (Shedinja) list.Add(292); // Shedinja
+        if (L) list.AddRange(Enumerable.Range(377, 8)); // Regi, Lati, Mascot
+        if (E) list.AddRange(Enumerable.Range(385, 2)); // Jirachi/Deoxys
+    }
+
+    private void AddGen4Species(List<int> list)
+    {
+        list.AddRange(Enumerable.Range(387, 93)); // Turtwig - Rotom
+        if (L) list.AddRange(Enumerable.Range(480, 9)); // Sinnoh Legends
+        if (E) list.AddRange(Enumerable.Range(489, 5)); // Phione, Manaphy, Darkrai, Shaymin, Arceus
+    }
+
+    private void AddGen5Species(List<int> list)
+    {
+        list.AddRange(Enumerable.Range(495, 143)); // Snivy - Volcarona
+        if (L) list.AddRange(Enumerable.Range(638, 9)); // Unova Legends
+        if (E)
+        {
+            list.Add(494); // Victini
+            list.AddRange(Enumerable.Range(647, 3)); // Keldeo, Meloetta, Genesect
+        }
+    }
+
+    private void AddGen6Species(List<int> list)
+    {
+        list.AddRange(Enumerable.Range(650, 66)); // Chespin - Noivern
+        if (L) list.AddRange(Enumerable.Range(716, 3)); // Kalos Legends
+        if (E) list.AddRange(Enumerable.Range(719, 3)); // Diancie, Hoopa, Volcanion
+    }
+
+    private void AddGen7Species(List<int> list)
+    {
+        list.AddRange(Enumerable.Range(722, 50)); // Rowlet - Pyukumuku
+        list.AddRange(Enumerable.Range(774, 11)); // Minior - Kommo-o
+
+        if (L)
+        {
+            list.AddRange(Enumerable.Range(772, 2)); // Type: Null, Silvally
+            list.AddRange(Enumerable.Range(785, 16)); // Tapus, Legends, UBs
+        }
+        if (E) list.AddRange(Enumerable.Range(801, 2)); // Magearna, Marshadow
+
+        if (MaxSpeciesID >= 807) // USUM
+        {
+            if (L) list.AddRange(Enumerable.Range(803, 4)); // Poipole, Naganadel, Stakataka, Blacephalon
+            if (E) list.Add(807); // Zeraora
+        }
+    }
+
+    private void AddGen8Species(List<int> list)
+    {
+        if (MaxSpeciesID >= 905)
+        {
+            // Standard / regular species
+            list.AddRange(Enumerable.Range(810, 887 - 810 + 1)); // Grookey to Dragapult
+            list.AddRange(Enumerable.Range(899, 904 - 899 + 1)); // Wyrdeer to Overqwil
+
+            if (L)
+            {
+                list.AddRange(Enumerable.Range(888, 892 - 888 + 1)); // Zacian, Zamazenta, Eternatus, Kubfu, Urshifu
+                list.AddRange(Enumerable.Range(894, 898 - 894 + 1)); // Regieleki, Regidrago, Glastrier, Spectrier, Calyrex
+                list.Add(905); // Enamorus
+            }
+            if (E)
+            {
+                list.AddRange(Enumerable.Range(808, 809 - 808 + 1)); // Meltan, Melmetal
+                list.Add(893); // Zarude
+            }
+        }
+    }
+
+    private void AddGen9Species(List<int> list)
+    {
+        if (MaxSpeciesID >= 1025)
+        {
+            // Standard / regular species
+            list.AddRange(Enumerable.Range(906, 983 - 906 + 1)); // Sprigatito to Kingambit
+            list.AddRange(Enumerable.Range(996, 1000 - 996 + 1)); // Frigibax to Gholdengo
+            list.AddRange(Enumerable.Range(1011, 1013 - 1011 + 1)); // Dipplin, Poltchageist, Sinistcha
+            list.AddRange(Enumerable.Range(1018, 1019 - 1018 + 1)); // Archaludon, Hydrapple
+
+            if (L)
+            {
+                list.AddRange(Enumerable.Range(984, 995 - 984 + 1)); // Paradox Gen 9 (Past/Future)
+                list.AddRange(Enumerable.Range(1001, 1004 - 1001 + 1)); // Treasures of Ruin
+                list.AddRange(Enumerable.Range(1005, 1006 - 1005 + 1)); // Roaring Moon, Iron Valiant
+                list.AddRange(Enumerable.Range(1007, 1008 - 1007 + 1)); // Koraidon, Miraidon
+                list.AddRange(Enumerable.Range(1009, 1010 - 1009 + 1)); // Walking Wake, Iron Leaves
+                list.AddRange(Enumerable.Range(1014, 1017 - 1014 + 1)); // Loyal Three + Ogerpon
+                list.AddRange(Enumerable.Range(1020, 1023 - 1020 + 1)); // DLC Paradox
+                list.Add(1024); // Terapagos
+            }
+            if (E)
+            {
+                list.Add(1025); // Pecharunt
+            }
+        }
+    }
+
+    public int[] RandomSpeciesList => Enumerable.Range(1, MaxSpeciesID).ToArray();
+
+    private bool GetNewSpecies(int currentSpecies, PersonalInfo oldpkm, out int newSpecies)
+    {
+        newSpecies = RandSpec.Next();
+        PersonalInfo pkm = SpeciesStat[newSpecies];
+
+        // Verify it meets specifications
+        if (IsSpeciesReplacementBad(newSpecies, currentSpecies)) // no A->A randomization
+            return false;
+        if (IsSpeciesEXPRateBad(oldpkm, pkm))
+            return false;
+        if (IsSpeciesTypeBad(oldpkm, pkm))
+            return false;
+        if (IsSpeciesBSTBad(oldpkm, pkm))
+            return false;
+        return true;
+    }
+}

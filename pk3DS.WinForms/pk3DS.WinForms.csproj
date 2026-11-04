@@ -1,0 +1,137 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Source paths are compiled into the PDB and surface in every stack trace, which exposes
+         the build machine's directory layout to anyone a crash report is sent to. Mapping the
+         project root to a relative prefix keeps file names and line numbers while dropping the
+         part that identifies the machine. -->
+    <PathMap>$(MSBuildThisFileDirectory)=./</PathMap>
+    <EnableSourceLink>false</EnableSourceLink>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+  </PropertyGroup>
+	
+  <ItemGroup>
+    <ProjectReference Include="..\pk3DS.Core\pk3DS.Core.csproj" />
+  </ItemGroup>
+  
+  <ItemGroup>
+    <Content Include="Resources\**\*.*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- Patch packages are data the Recipes tab loads at run time, not compiled in, so a package
+         can be edited or added without rebuilding. -->
+    <Content Include="..\patch-packages\*.json" LinkBase="patch-packages">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- Translations (TextPackage JSON), installed by the Uhuru English prompt; kept out of patch-packages so the Recipes list never shows them. -->
+    <Content Include="..\text-packages\*.json" LinkBase="text-packages">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- Loose .ips code patches, kept in per-version folders. US and UM share file names but hold
+         different offsets, so the folder structure is what keeps them apart. -->
+    <Content Include="..\other-ips\**\*.ips" LinkBase="other-ips">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <EmbeddedResource Include="Resources\learnsets.txt" />
+    <EmbeddedResource Include="Resources\randsettings.txt" />
+    <EmbeddedResource Include="Resources\quotes.txt" />
+    <EmbeddedResource Include="Resources\graidents.txt" />
+    <EmbeddedResource Include="Resources\Pokemon_Move_Changes_Gen7_to_Gen9.txt" />
+    <EmbeddedResource Include="Resources\exclusivesandsuch.txt" />
+    <EmbeddedResource Include="Resources\code_map.csv" />
+    <EmbeddedResource Include="Resources\_*.png" />
+  </ItemGroup>
+  
+  <ItemGroup>
+    <Compile Update="Properties\Resources.Designer.cs">
+      <DesignTime>True</DesignTime>
+      <AutoGen>True</AutoGen>
+      <DependentUpon>Resources.resx</DependentUpon>
+    </Compile>
+    <Compile Update="Properties\Settings.Designer.cs">
+      <DesignTimeSharedInput>True</DesignTimeSharedInput>
+      <AutoGen>True</AutoGen>
+      <DependentUpon>Settings.settings</DependentUpon>
+    </Compile>
+  </ItemGroup>
+  
+  <ItemGroup>
+    <EmbeddedResource Update="Properties\Resources.resx">
+      <Generator>ResXFileCodeGenerator</Generator>
+      <LastGenOutput>Resources.Designer.cs</LastGenOutput>
+    </EmbeddedResource>
+  </ItemGroup>
+  
+  <ItemGroup>
+    <None Update="Properties\Settings.settings">
+      <Generator>SettingsSingleFileGenerator</Generator>
+      <LastGenOutput>Settings.Designer.cs</LastGenOutput>
+    </None>
+  </ItemGroup>
+  
+  <ItemGroup>
+    <Content Include="..\US\**\*.*" Condition="Exists('..\US')">
+      <Link>US\%(RecursiveDir)%(FileName)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\UM\**\*.*" Condition="Exists('..\UM')">
+      <Link>UM\%(RecursiveDir)%(FileName)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- CustomSpriteEditor reads/writes Application.StartupPath\CustomSprites at runtime, so the
+         real source of truth for these sprites (checked into the repo root) needs to be synced
+         into every build output directory, the same way US\/UM\ are — otherwise sprites only
+         exist wherever someone happened to manually drop them into a bin\ folder and are lost on
+         a clean build or when running from a different configuration. -->
+    <Content Include="..\CustomSprites\**\*.*" Condition="Exists('..\CustomSprites')">
+      <Link>CustomSprites\%(RecursiveDir)%(FileName)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- ItemSpriteCache reads AppDomain.BaseDirectory\ItemSprites at runtime, so the downloaded
+         art has to reach every build output the same way CustomSprites does - otherwise the
+         sprites only exist in the repo root and every lookup misses. -->
+    <Content Include="..\ItemSprites\**\*.*" Condition="Exists('..\ItemSprites')">
+      <Link>ItemSprites\%(RecursiveDir)%(FileName)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- CustomSpriteEditor reads/writes Application.StartupPath\CustomSprites at runtime, so the
+         real source of truth for these sprites (checked into the repo root) needs to be synced
+         into every build output directory, the same way US\/UM\ are — otherwise sprites only
+         exist wherever someone happened to manually drop them into a bin\ folder and are lost on
+         a clean build or when running from a different configuration. -->
+    <Content Include="..\CustomSprites\**\*.*" Condition="Exists('..\CustomSprites')">
+      <Link>CustomSprites\%(RecursiveDir)%(FileName)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- ItemSpriteCache reads AppDomain.BaseDirectory\ItemSprites at runtime, so the downloaded
+         art has to reach every build output the same way CustomSprites does - otherwise the
+         sprites only exist in the repo root and every lookup misses. -->
+    <Content Include="..\ItemSprites\**\*.*" Condition="Exists('..\ItemSprites')">
+      <Link>ItemSprites\%(RecursiveDir)%(FileName)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="PackEnglishV9\**\*.*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="DotNet.3DS.Toolkit.v1.4.6\**\*.*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Gee.External.Capstone" Version="2.3.0" />
+    <PackageReference Include="keystoneengine.csharp" Version="0.9.1.1" />
+  </ItemGroup>
+
+
+  <Target Name="CopyNativeDLLs" AfterTargets="AfterBuild">
+    <Copy SourceFiles="$(OutputPath)x64\keystone.dll" DestinationFolder="$(OutputPath)" Condition="Exists('$(OutputPath)x64\keystone.dll')" />
+    <Copy SourceFiles="$(OutputPath)x64\capstone.dll" DestinationFolder="$(OutputPath)" Condition="Exists('$(OutputPath)x64\capstone.dll')" />
+    <Copy SourceFiles="$(OutputPath)x86\keystone.dll" DestinationFolder="$(OutputPath)" Condition="Exists('$(OutputPath)x86\keystone.dll') AND !Exists('$(OutputPath)keystone.dll')" />
+  </Target>
+  
+</Project>
