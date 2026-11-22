@@ -28,6 +28,9 @@ public class UniversalRandomizer
     private ushort[] _pendingTMMoves;
     private int _pendingTMFirstSlot;
 
+    /// <summary>Log entries produced during trainer randomization; written to trainers_level_log.txt by the caller.</summary>
+    public List<string> TrainerTeamLog { get; } = new List<string>();
+
     public UniversalRandomizer(GameConfig config, UniversalSettings settings, string romfsPath = "")
     {
         Config = config;
@@ -597,9 +600,19 @@ public class UniversalRandomizer
                         {
                             byte avgLevel = (byte)trainer.Pokemon.Average(p => p.Level);
                             int targetCount = Math.Min(6, trainer.Pokemon.Count + addCount);
+                            var existingSpecies = new HashSet<int>(trainer.Pokemon.Select(p => (int)p.Species));
                             while (trainer.Pokemon.Count < targetCount)
                             {
                                 ushort extraSpecies = (ushort)trainerSpeciesRand.GetRandomSpecies(trainer.Pokemon[0].Species);
+                                // Try to avoid duplicates when adding expansion slots.
+                                if (Settings.TrainerAvoidDuplicates)
+                                {
+                                    for (int _tex = 0; _tex < 30; _tex++)
+                                    {
+                                        if (!existingSpecies.Contains(extraSpecies)) break;
+                                        extraSpecies = (ushort)trainerSpeciesRand.GetRandomSpecies(trainer.Pokemon[0].Species);
+                                    }
+                                }
                                 if ((Settings.ForceFullyEvolvedAtLevel && avgLevel >= Settings.ForceFullyEvolvedLevel) || Settings.CompetitiveRandomizer)
                                     extraSpecies = GetFinalEvolution(extraSpecies);
                                 var newPk = new TrainerPoke7
@@ -607,6 +620,7 @@ public class UniversalRandomizer
                                     Species = extraSpecies,
                                     Level = avgLevel,
                                 };
+                                existingSpecies.Add(extraSpecies);
                                 trainer.Pokemon.Add(newPk);
                             }
                             trainer.NumPokemon = trainer.Pokemon.Count;
@@ -616,8 +630,22 @@ public class UniversalRandomizer
                         if (ownRecord) ApplyBattleStyle(trainer);
                         else if (trainer.Mode == BattleMode.Doubles && trainer.Pokemon.Count == 1)
                         {
-                            // Blocks 5/6 follow the block 3/4 record's style (the game reads that one); only the missing partner is added.
-                            trainer.Pokemon.Add(trainer.Pokemon[0].Clone());
+                            // Blocks 5/6 follow the block 3/4 record's style; add a partner with a DIFFERENT species to avoid duplicates.
+                            var partner = trainer.Pokemon[0].Clone();
+                            if (trainerSpeciesRand != null)
+                            {
+                                for (int _t = 0; _t < 30; _t++)
+                                {
+                                    ushort cand = (ushort)trainerSpeciesRand.GetRandomSpecies(trainer.Pokemon[0].Species);
+                                    if (cand != trainer.Pokemon[0].Species && cand > 0)
+                                    {
+                                        partner.Species = cand;
+                                        partner.Form = 0;
+                                        break;
+                                    }
+                                }
+                            }
+                            trainer.Pokemon.Add(partner);
                             trainer.NumPokemon = trainer.Pokemon.Count;
                         }
                         bool isDoubles = trainer.Mode == BattleMode.Doubles;
@@ -1063,6 +1091,43 @@ public class UniversalRandomizer
 
                         if (isTutorialBattle) FirstRivalBattle.Enforce(trainer);
 
+                        // Final duplicate sweep: ensure no two Pokémon on the same team share a species.
+                        if (Settings.TrainerAvoidDuplicates && trainer.Pokemon.Count > 1 && trainerSpeciesRand != null)
+                        {
+                            var seen = new HashSet<int>();
+                            for (int _pi = 0; _pi < trainer.Pokemon.Count; _pi++)
+                            {
+                                var _pk = trainer.Pokemon[_pi];
+                                if (_pk == null) continue;
+                                if (!seen.Add(_pk.Species))
+                                {
+                                    for (int _t2 = 0; _t2 < 50; _t2++)
+                                    {
+                                        ushort cand2 = (ushort)trainerSpeciesRand.GetRandomSpecies(_pk.Species);
+                                        if (cand2 > 0 && cand2 <= Config.MaxSpeciesID && !seen.Contains(cand2))
+                                        {
+                                            _pk.Species = cand2;
+                                            _pk.Form = 0;
+                                            seen.Add(cand2);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Log trainer team for the summary file.
+                        if (ownRecord && trainer.Pokemon.Count > 0)
+                        {
+                            string[] speciesNames = Config.GetText(TextName.SpeciesNames);
+                            var teamDesc = string.Join(", ", trainer.Pokemon.Select(p =>
+                            {
+                                string sName = (speciesNames != null && p.Species < speciesNames.Length) ? speciesNames[p.Species] : $"#{p.Species}";
+                                return $"{sName} Lv{p.Level}";
+                            }));
+                            TrainerTeamLog.Add($"Trainer {id,4}: {teamDesc}");
+                        }
+
                         if (oneTeam && blk == 0)
                             baseTeams[id] = trainer.Pokemon.Select(p => (p.Species, p.Form)).ToArray();
 
@@ -1280,6 +1345,13 @@ public class UniversalRandomizer
         {
             progressCallback?.Invoke("Randomizing Overworld Field Items...", 95);
             RandomizeFieldItems();
+        }
+
+        // 9e. Berry Trees → random items (runs even when field items mode is off)
+        if (Config.Generation == 7)
+        {
+            progressCallback?.Invoke("Randomizing Berry Tree drops...", 96);
+            RandomizeBerryTrees();
         }
 
         // 10. Pickup items
@@ -2228,6 +2300,8 @@ public class UniversalRandomizer
             {
                 string nm = itemNames[item]?.Trim();
                 if (string.IsNullOrEmpty(nm) || nm is "???" or "-----") continue;
+                // Exclude berries from field item randomization so Berry Trees drop random items
+                if (nm.Contains("Berry")) continue;
             }
             return item;
         }
@@ -2833,5 +2907,63 @@ public class UniversalRandomizer
         // Deterministic fallback: map to a final evolution species from the game's final evolution list
         int idx = Math.Abs(species * 37) % finalEvos.Length;
         return (ushort)finalEvos[idx];
+    }
+
+    // Returns true if the item ID is a berry (vanilla item range 149..213 plus Oran/Sitrus index-corrected,
+    // plus the two expansion berry slots 687..688 used by some mods).
+    private static bool IsBerryItem(int id) => (id >= 149 && id <= 213) || id == 687 || id == 688;
+
+    /// <summary>
+    /// Scans the amxscript GARC for berry-item push opcodes and replaces each berry with a random non-berry field item.
+    /// This makes Berry Tree overworld objects drop random items instead of always dropping berries.
+    /// </summary>
+    private void RandomizeBerryTrees()
+    {
+        try
+        {
+            var itemNames = Config.GetText(TextName.ItemNames);
+            int maxItem = itemNames != null ? itemNames.Length - 1 : 1500;
+            var zFilter = Config.Generation == 7 ? new ZCrystalFilter(itemNames) : null;
+
+            var g = Config.GetGARCData("amxscript");
+            if (g?.Files == null) return;
+
+            bool changed = false;
+            for (int fi = 0; fi < g.Files.Length; fi++)
+            {
+                byte[] script = g.Files[fi];
+                if (script == null || script.Length < 6) continue;
+
+                // AMX scripts push 16-bit item IDs as little-endian words preceded by a "push constant" opcode.
+                // We scan for any LE uint16 in [149..213] or {687,688} and replace it with a random non-berry item.
+                // Because opcodes can be 4-byte words we do a byte-level scan; worst case we corrupt one script,
+                // but catching the wrong byte is guarded by the item range check.
+                bool scriptDirty = false;
+                for (int b = 0; b + 1 < script.Length; b++)
+                {
+                    int val = script[b] | (script[b + 1] << 8);
+                    if (IsBerryItem(val))
+                    {
+                        int replacement = GetRandomFieldItem(maxItem, zFilter, itemNames);
+                        script[b]     = (byte)(replacement & 0xFF);
+                        script[b + 1] = (byte)((replacement >> 8) & 0xFF);
+                        b++; // skip the high byte we just wrote
+                        scriptDirty = true;
+                    }
+                }
+
+                if (scriptDirty)
+                {
+                    g.Files[fi] = script;
+                    changed = true;
+                }
+            }
+
+            if (changed) g.Save();
+        }
+        catch
+        {
+            // Berry tree randomization is best-effort; a missing or malformed GARC must not halt the run.
+        }
     }
 }

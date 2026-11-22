@@ -577,7 +577,7 @@ public class UniversalRandomizerForm : Form
         CB_TrainerMode.SelectedIndex = 0;
 
         CHK_TrainerBetterMovesets = new CheckBox { Text = "Better Movesets", Location = new Point(15, 66), AutoSize = true, Checked = true };
-        CHK_TrainerAvoidDuplicates = new CheckBox { Text = "Try to Avoid Duplicates", Location = new Point(15, 88), AutoSize = true };
+        CHK_TrainerAvoidDuplicates = new CheckBox { Text = "Try to Avoid Duplicates", Location = new Point(15, 88), AutoSize = true, Checked = true };
 
         CHK_TrainerDoubleBattle = new CheckBox { Text = "Double Battle Mode", AutoSize = true };
 
@@ -665,8 +665,8 @@ public class UniversalRandomizerForm : Form
         RB_TotemRandomSimilar = new RadioButton { Text = "Random (similar strength)", Location = new Point(15, 70), AutoSize = true };
 
         var GB_Ally = new GroupBox { Text = "Ally Pokemon", Location = new Point(190, 15), Size = new Size(175, 100) };
-        RB_AllyUnchanged = new RadioButton { Text = "Unchanged", Location = new Point(10, 20), AutoSize = true, Checked = true };
-        RB_AllyRandom = new RadioButton { Text = "Random", Location = new Point(10, 45), AutoSize = true };
+        RB_AllyUnchanged = new RadioButton { Text = "Unchanged", Location = new Point(10, 20), AutoSize = true };
+        RB_AllyRandom = new RadioButton { Text = "Random", Location = new Point(10, 45), AutoSize = true, Checked = true };
         RB_AllyRandomSimilar = new RadioButton { Text = "Random (similar strength)", Location = new Point(10, 70), AutoSize = true };
         GB_Ally.Controls.AddRange(new Control[] { RB_AllyUnchanged, RB_AllyRandom, RB_AllyRandomSimilar });
 
@@ -2038,7 +2038,7 @@ public class UniversalRandomizerForm : Form
         }
 
         Action<SpeciesRandomizer, FormRandomizer> staticsAction = null;
-        if (settings.StaticsMode > 0)
+        if (settings.StaticsMode > 0 || settings.TotemMode > 0 || settings.TotemAllyMode > 0)
         {
             staticsAction = (rnd, form) =>
             {
@@ -2047,6 +2047,9 @@ public class UniversalRandomizerForm : Form
                     var esg = Main.Config.GetGARCData("encounterstatic");
                     if (esg?.Files != null && esg.Files.Length > 1)
                     {
+                        // Build an evolution-family map for ally species checks.
+                        var evRestrictions = new WildRestrictions(Main.Config);
+
                         // Uhuru: the game reads file 6 + difficulty mode, so 1,6,7,8 (Normal) and 9,10,11 (Hard) are all live.
                         // One new species per record (picked from the Normal record), written into every live copy; each file keeps its own level.
                         bool uhuru = Main.Config.Info is { TrainerBaseCount: > 0 } && esg.Files.Length >= 12;
@@ -2055,26 +2058,122 @@ public class UniversalRandomizerForm : Form
                         byte[] baseData = all[1]; // File 1: Encounters
                         if (baseData != null && baseData.Length >= EncounterStatic7.SIZE)
                         {
+                            // Track species→newSpecies mapping so Ally indices (which point back into this table)
+                            // also get the same totem remapping when StaticsMode is active.
+                            var speciesRemap = new System.Collections.Generic.Dictionary<int, ushort>();
+
                             for (int i = 0; i + EncounterStatic7.SIZE <= baseData.Length; i += EncounterStatic7.SIZE)
                             {
                                 var baseEnc = new EncounterStatic7(baseData.AsSpan(i, EncounterStatic7.SIZE).ToArray());
                                 if (baseEnc.Species <= 0 || baseEnc.Species > Main.Config.MaxSpeciesID) continue;
-                                ushort newSpec = (ushort)(settings.StaticsMode == 3 ? rnd.GetMappedSpecies(baseEnc.Species) : rnd.GetRandomSpecies(baseEnc.Species));
+
+                                ushort newSpec = baseEnc.Species;
+                                if (settings.StaticsMode > 0)
+                                {
+                                    newSpec = (ushort)(settings.StaticsMode == 3 ? rnd.GetMappedSpecies(baseEnc.Species) : rnd.GetRandomSpecies(baseEnc.Species));
+                                    speciesRemap[baseEnc.Species] = newSpec;
+                                }
+
                                 foreach (int f in targets)
                                 {
                                     byte[] data = all[f];
                                     if (i + EncounterStatic7.SIZE > data.Length) continue;
                                     var enc = new EncounterStatic7(data.AsSpan(i, EncounterStatic7.SIZE).ToArray());
                                     if (enc.Species <= 0 || enc.Species > Main.Config.MaxSpeciesID) continue;
-                                    enc.Species = newSpec;
+
+                                    if (settings.StaticsMode > 0)
+                                        enc.Species = newSpec;
+
                                     if (settings.StaticsLevelModifierPercent != 0)
                                     {
                                         enc.Level = (byte)Math.Clamp((int)(enc.Level * (1 + settings.StaticsLevelModifierPercent / 100m)), 1, 100);
                                     }
+
+                                    // Totem ally randomization: pick fully-random species for Ally1 / Ally2.
+                                    if (settings.TotemAllyMode > 0 && (enc.Ally1 > 0 || enc.Ally2 > 0 || enc.Aura != 0))
+                                    {
+                                        int totemRoot = evRestrictions.RootOf(enc.Species);
+
+                                        if (enc.Ally1 > 0)
+                                        {
+                                            // Ally1/Ally2 are 1-based record indices into the same encounter file.
+                                            // We store the new species directly in the ally slot's species field below.
+                                            int ally1Offset = (enc.Ally1 - 1) * EncounterStatic7.SIZE;
+                                            if (ally1Offset + EncounterStatic7.SIZE <= data.Length)
+                                            {
+                                                var allyEnc = new EncounterStatic7(data.AsSpan(ally1Offset, EncounterStatic7.SIZE).ToArray());
+                                                ushort allySpec = allyEnc.Species;
+                                                for (int _t = 0; _t < 60; _t++)
+                                                {
+                                                    ushort cand = (ushort)rnd.GetRandomSpecies(allySpec > 0 ? allySpec : 1);
+                                                    if (cand <= 0 || cand > Main.Config.MaxSpeciesID) continue;
+                                                    if (evRestrictions.RootOf(cand) == totemRoot) continue;
+                                                    allySpec = cand;
+                                                    break;
+                                                }
+                                                allyEnc.Species = allySpec;
+                                                allyEnc.Form = 0;
+                                                Array.Copy(allyEnc.Data, 0, data, ally1Offset, EncounterStatic7.SIZE);
+                                            }
+                                        }
+
+                                        if (enc.Ally2 > 0)
+                                        {
+                                            int ally2Offset = (enc.Ally2 - 1) * EncounterStatic7.SIZE;
+                                            if (ally2Offset + EncounterStatic7.SIZE <= data.Length)
+                                            {
+                                                var allyEnc2 = new EncounterStatic7(data.AsSpan(ally2Offset, EncounterStatic7.SIZE).ToArray());
+                                                ushort allySpec2 = allyEnc2.Species;
+                                                for (int _t = 0; _t < 60; _t++)
+                                                {
+                                                    ushort cand = (ushort)rnd.GetRandomSpecies(allySpec2 > 0 ? allySpec2 : 1);
+                                                    if (cand <= 0 || cand > Main.Config.MaxSpeciesID) continue;
+                                                    if (evRestrictions.RootOf(cand) == totemRoot) continue;
+                                                    allySpec2 = cand;
+                                                    break;
+                                                }
+                                                allyEnc2.Species = allySpec2;
+                                                allyEnc2.Form = 0;
+                                                Array.Copy(allyEnc2.Data, 0, data, ally2Offset, EncounterStatic7.SIZE);
+                                            }
+                                        }
+                                    }
+
                                     Array.Copy(enc.Data, 0, data, i, EncounterStatic7.SIZE);
                                 }
                             }
                             esg.Save();
+                        }
+
+                        // --- Totem Sticker Gift Pokémon (Files[0], entries 3+) ---
+                        // Entries 0..2 = Starters (handled by RandomizeStarters).
+                        // Entries 3+ = Samson Oak's Totem Sticker gifts in USUM.
+                        byte[] giftData = all[0];
+                        if (giftData != null && giftData.Length > 3 * EncounterGift7.SIZE)
+                        {
+                            bool giftChanged = false;
+                            for (int g = 3; g * EncounterGift7.SIZE + EncounterGift7.SIZE <= giftData.Length; g++)
+                            {
+                                int gOffset = g * EncounterGift7.SIZE;
+                                var gift = new EncounterGift7(giftData.AsSpan(gOffset, EncounterGift7.SIZE).ToArray());
+                                if (gift.Species <= 0 || gift.Species > Main.Config.MaxSpeciesID) continue;
+
+                                // Randomize species to a completely random one.
+                                gift.Species = (ushort)rnd.GetRandomSpecies(gift.Species);
+                                gift.Form = 0;
+
+                                // Set all 6 IVs to 31 (bytes 0xE..0x13 in gift.Data).
+                                for (int iv = 0; iv < 6; iv++)
+                                    gift.Data[0xE + iv] = 31;
+
+                                Array.Copy(gift.Data, 0, giftData, gOffset, EncounterGift7.SIZE);
+                                giftChanged = true;
+                            }
+                            if (giftChanged)
+                            {
+                                all[0] = giftData;
+                                esg.Save();
+                            }
                         }
                     }
                 }
@@ -2097,7 +2196,22 @@ public class UniversalRandomizerForm : Form
 
             string logNote = WriteRunLog();
             string weightNote = weightProblems > 0 ? $"\n{weightProblems} competitive weight problem(s); see randomizer_log.txt." : "";
-            WinFormsUtil.Alert("Universal Randomization finished successfully!\nAll game files have been updated with UPR-ZX parity." + weightNote + logNote);
+
+            // Write trainer level log to disk.
+            string trainerLogNote = "";
+            try
+            {
+                var trainerLog = orchestrator.TrainerTeamLog;
+                if (trainerLog != null && trainerLog.Count > 0)
+                {
+                    string logPath = System.IO.Path.Combine(Main.RomFSPath ?? "", "trainers_level_log.txt");
+                    System.IO.File.WriteAllLines(logPath, trainerLog);
+                    trainerLogNote = $"\nTrainer log saved: trainers_level_log.txt ({trainerLog.Count} trainers)";
+                }
+            }
+            catch { /* log write failure must not block the success message */ }
+
+            WinFormsUtil.Alert("Universal Randomization finished successfully!\nAll game files have been updated with UPR-ZX parity." + weightNote + logNote + trainerLogNote);
             this.Close();
         }
         catch (Exception ex)

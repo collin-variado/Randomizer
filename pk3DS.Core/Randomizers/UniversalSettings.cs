@@ -171,7 +171,7 @@ public class UniversalSettings
     // Trainer Pokemon
     public int TrainerPokemonMode { get; set; } = 0;
 
-    public bool TrainerAvoidDuplicates { get; set; } = false;
+    public bool TrainerAvoidDuplicates { get; set; } = true;
 
     public bool TrainerDiverseTypesBoss { get; set; } = false;
 
@@ -222,7 +222,7 @@ public class UniversalSettings
 
     // Totem Pokemon (Gen 7)
     public int TotemMode { get; set; } = 0; // 0: Unchanged, 1: Random, 2: Random (similar strength)
-    public int TotemAllyMode { get; set; } = 0; // 0: Unchanged, 1: Random, 2: Random (similar strength)
+    public int TotemAllyMode { get; set; } = 1; // 0: Unchanged, 1: Random, 2: Random (similar strength)
     public int TotemAuraMode { get; set; } = 0; // 0: Unchanged, 1: Random, 2: Random (same strength)
     public bool TotemRandomizeHeldItems { get; set; } = false;
     public bool TotemAllowAltFormes { get; set; } = true;

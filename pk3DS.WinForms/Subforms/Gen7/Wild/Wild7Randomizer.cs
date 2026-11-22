@@ -205,15 +205,24 @@ public class Wild7Randomizer
             {
                 var baseEnc = Table.Encounter7s[0][i];
                 var sosEnc = sosSet[i];
-                if (sosEnc.Species != 0)
+                if (sosEnc.Species != 0 || (baseEnc.Species != 0 && AllCanCallAllies))
                 {
-                    sosEnc.Species = (uint)GetSpecies((int)sosEnc.Species);
-                    sosEnc.Forme = (uint)RandForm.GetRandomForme((int)sosEnc.Species);
-                }
-                else if (baseEnc.Species != 0 && AllCanCallAllies)
-                {
-                    sosEnc.Species = (uint)GetSpecies((int)baseEnc.Species);
-                    sosEnc.Forme = (uint)RandForm.GetRandomForme((int)sosEnc.Species);
+                    int baseSpec = (int)baseEnc.Species;
+                    int baseRoot = (Restrictions != null && baseSpec > 0) ? Restrictions.RootOf(baseSpec) : baseSpec;
+                    int picked = 0;
+                    for (int tries = 0; tries < 50; tries++)
+                    {
+                        int candidate = RandSpec.GetRandomSpecies();
+                        if (candidate <= 0 || (Config != null && candidate > Config.MaxSpeciesID)) continue;
+                        if (candidate == baseSpec) continue;
+                        int candRoot = (Restrictions != null && candidate > 0) ? Restrictions.RootOf(candidate) : candidate;
+                        if (candRoot == baseRoot) continue;
+                        picked = candidate;
+                        break;
+                    }
+                    if (picked == 0) picked = RandSpec.GetRandomSpecies();
+                    sosEnc.Species = (uint)picked;
+                    sosEnc.Forme = (uint)RandForm.GetRandomForme(picked);
                 }
             }
         }
@@ -224,15 +233,12 @@ public class Wild7Randomizer
             for (int i = 0; i < Table.AdditionalSOS.Length; i++)
             {
                 var weatherEnc = Table.AdditionalSOS[i];
-                if (weatherEnc.Species != 0)
+                if (weatherEnc.Species != 0 || AllCanCallAllies)
                 {
-                    weatherEnc.Species = (uint)GetSpecies((int)weatherEnc.Species);
-                    weatherEnc.Forme = (uint)RandForm.GetRandomForme((int)weatherEnc.Species);
-                }
-                else if (AllCanCallAllies)
-                {
-                    weatherEnc.Species = (uint)RandSpec.GetEvenDistributionSpecies();
-                    weatherEnc.Forme = (uint)RandForm.GetRandomForme((int)weatherEnc.Species);
+                    int picked = RandSpec.GetEvenDistributionSpecies();
+                    if (picked <= 0) picked = RandSpec.GetRandomSpecies();
+                    weatherEnc.Species = (uint)picked;
+                    weatherEnc.Forme = (uint)RandForm.GetRandomForme(picked);
                 }
             }
         }
@@ -303,7 +309,7 @@ public class Wild7Randomizer
                 TableSpecies = AvoidRepeats ? [] : null;
 
                 RandomizeTable7(Table, slotStart, slotStop);
-                if (copy) // copy row 0 to rest (including weather)
+                if (copy && TableRandomizationOption == (int)RandOption.Regular_CopySOS) // copy row 0 to rest (including weather)
                     Table.CopySlotsToSOS(true);
 
                 Table.Write();
