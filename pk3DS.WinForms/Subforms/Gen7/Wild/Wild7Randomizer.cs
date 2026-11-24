@@ -212,7 +212,7 @@ public class Wild7Randomizer
                     int picked = 0;
                     for (int tries = 0; tries < 50; tries++)
                     {
-                        int candidate = RandSpec.GetRandomSpecies();
+                        int candidate = RandSpec.GetRandomSpecies(baseSpec > 0 ? baseSpec : 1);
                         if (candidate <= 0 || (Config != null && candidate > Config.MaxSpeciesID)) continue;
                         if (candidate == baseSpec) continue;
                         int candRoot = (Restrictions != null && candidate > 0) ? Restrictions.RootOf(candidate) : candidate;
@@ -220,7 +220,7 @@ public class Wild7Randomizer
                         picked = candidate;
                         break;
                     }
-                    if (picked == 0) picked = RandSpec.GetRandomSpecies();
+                    if (picked == 0) picked = RandSpec.GetRandomSpecies(baseSpec > 0 ? baseSpec : 1);
                     sosEnc.Species = (uint)picked;
                     sosEnc.Forme = (uint)RandForm.GetRandomForme(picked);
                 }
@@ -236,7 +236,7 @@ public class Wild7Randomizer
                 if (weatherEnc.Species != 0 || AllCanCallAllies)
                 {
                     int picked = RandSpec.GetEvenDistributionSpecies();
-                    if (picked <= 0) picked = RandSpec.GetRandomSpecies();
+                    if (picked <= 0) picked = RandSpec.GetRandomSpecies(weatherEnc.Species > 0 ? (int)weatherEnc.Species : 1);
                     weatherEnc.Species = (uint)picked;
                     weatherEnc.Forme = (uint)RandForm.GetRandomForme(picked);
                 }

@@ -2067,7 +2067,7 @@ public class UniversalRandomizerForm : Form
                                 var baseEnc = new EncounterStatic7(baseData.AsSpan(i, EncounterStatic7.SIZE).ToArray());
                                 if (baseEnc.Species <= 0 || baseEnc.Species > Main.Config.MaxSpeciesID) continue;
 
-                                ushort newSpec = baseEnc.Species;
+                                ushort newSpec = (ushort)baseEnc.Species;
                                 if (settings.StaticsMode > 0)
                                 {
                                     newSpec = (ushort)(settings.StaticsMode == 3 ? rnd.GetMappedSpecies(baseEnc.Species) : rnd.GetRandomSpecies(baseEnc.Species));
@@ -2102,10 +2102,10 @@ public class UniversalRandomizerForm : Form
                                             if (ally1Offset + EncounterStatic7.SIZE <= data.Length)
                                             {
                                                 var allyEnc = new EncounterStatic7(data.AsSpan(ally1Offset, EncounterStatic7.SIZE).ToArray());
-                                                ushort allySpec = allyEnc.Species;
+                                                int allySpec = allyEnc.Species;
                                                 for (int _t = 0; _t < 60; _t++)
                                                 {
-                                                    ushort cand = (ushort)rnd.GetRandomSpecies(allySpec > 0 ? allySpec : 1);
+                                                    int cand = rnd.GetRandomSpecies(allySpec > 0 ? allySpec : 1);
                                                     if (cand <= 0 || cand > Main.Config.MaxSpeciesID) continue;
                                                     if (evRestrictions.RootOf(cand) == totemRoot) continue;
                                                     allySpec = cand;
@@ -2123,10 +2123,10 @@ public class UniversalRandomizerForm : Form
                                             if (ally2Offset + EncounterStatic7.SIZE <= data.Length)
                                             {
                                                 var allyEnc2 = new EncounterStatic7(data.AsSpan(ally2Offset, EncounterStatic7.SIZE).ToArray());
-                                                ushort allySpec2 = allyEnc2.Species;
+                                                int allySpec2 = allyEnc2.Species;
                                                 for (int _t = 0; _t < 60; _t++)
                                                 {
-                                                    ushort cand = (ushort)rnd.GetRandomSpecies(allySpec2 > 0 ? allySpec2 : 1);
+                                                    int cand = rnd.GetRandomSpecies(allySpec2 > 0 ? allySpec2 : 1);
                                                     if (cand <= 0 || cand > Main.Config.MaxSpeciesID) continue;
                                                     if (evRestrictions.RootOf(cand) == totemRoot) continue;
                                                     allySpec2 = cand;
@@ -2159,7 +2159,7 @@ public class UniversalRandomizerForm : Form
                                 if (gift.Species <= 0 || gift.Species > Main.Config.MaxSpeciesID) continue;
 
                                 // Randomize species to a completely random one.
-                                gift.Species = (ushort)rnd.GetRandomSpecies(gift.Species);
+                                gift.Species = rnd.GetRandomSpecies(gift.Species);
                                 gift.Form = 0;
 
                                 // Set all 6 IVs to 31 (bytes 0xE..0x13 in gift.Data).
