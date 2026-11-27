@@ -1347,13 +1347,6 @@ public class UniversalRandomizer
             RandomizeFieldItems();
         }
 
-        // 9e. Berry Trees → random items (runs even when field items mode is off)
-        if (Config.Generation == 7)
-        {
-            progressCallback?.Invoke("Randomizing Berry Tree drops...", 96);
-            RandomizeBerryTrees();
-        }
-
         // 10. Pickup items
         if (Settings.PickupItemsMode > 0)
         {
@@ -2912,58 +2905,4 @@ public class UniversalRandomizer
     // Returns true if the item ID is a berry (vanilla item range 149..213 plus Oran/Sitrus index-corrected,
     // plus the two expansion berry slots 687..688 used by some mods).
     private static bool IsBerryItem(int id) => (id >= 149 && id <= 213) || id == 687 || id == 688;
-
-    /// <summary>
-    /// Scans the amxscript GARC for berry-item push opcodes and replaces each berry with a random non-berry field item.
-    /// This makes Berry Tree overworld objects drop random items instead of always dropping berries.
-    /// </summary>
-    private void RandomizeBerryTrees()
-    {
-        try
-        {
-            var itemNames = Config.GetText(TextName.ItemNames);
-            int maxItem = itemNames != null ? itemNames.Length - 1 : 1500;
-            var zFilter = Config.Generation == 7 ? new ZCrystalFilter(itemNames) : null;
-
-            var g = Config.GetGARCData("amxscript");
-            if (g?.Files == null) return;
-
-            bool changed = false;
-            for (int fi = 0; fi < g.Files.Length; fi++)
-            {
-                byte[] script = g.Files[fi];
-                if (script == null || script.Length < 6) continue;
-
-                // AMX scripts push 16-bit item IDs as little-endian words preceded by a "push constant" opcode.
-                // We scan for any LE uint16 in [149..213] or {687,688} and replace it with a random non-berry item.
-                // Because opcodes can be 4-byte words we do a byte-level scan; worst case we corrupt one script,
-                // but catching the wrong byte is guarded by the item range check.
-                bool scriptDirty = false;
-                for (int b = 0; b + 1 < script.Length; b++)
-                {
-                    int val = script[b] | (script[b + 1] << 8);
-                    if (IsBerryItem(val))
-                    {
-                        int replacement = GetRandomFieldItem(maxItem, zFilter, itemNames);
-                        script[b]     = (byte)(replacement & 0xFF);
-                        script[b + 1] = (byte)((replacement >> 8) & 0xFF);
-                        b++; // skip the high byte we just wrote
-                        scriptDirty = true;
-                    }
-                }
-
-                if (scriptDirty)
-                {
-                    g.Files[fi] = script;
-                    changed = true;
-                }
-            }
-
-            if (changed) g.Save();
-        }
-        catch
-        {
-            // Berry tree randomization is best-effort; a missing or malformed GARC must not halt the run.
-        }
-    }
 }
